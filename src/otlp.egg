@@ -1,0 +1,185 @@
+// otel/otlp: spans as an OTLP/HTTP JSON request body
+// (ExportTraceServiceRequest, opentelemetry-proto's JSON encoding: ids as
+// hex, 64-bit integers as strings, enums as numbers).
+uses alloc
+
+const sc = @import("context.egg")
+const sp = @import("span.egg")
+
+const VERSION = "0.1.0"
+
+// s as a JSON string, quotes and all, at the end of out. Bytes past
+// ASCII go through as they are: text is UTF-8.
+fn append_string(a: Allocator, inout out: Buf(u8), s: []u8) void {
+    a.push(&out, '"')
+    for (s) |c| {
+        if (c == '"' or c == '\\') {
+            a.push(&out, '\\')
+            a.push(&out, c)
+        } else if (c == '\n') {
+            a.append_str(&out, "\\n")
+        } else if (c == '\r') {
+            a.append_str(&out, "\\r")
+        } else if (c == '\t') {
+            a.append_str(&out, "\\t")
+        } else if (c < 32 or c == 127) {
+            a.append_str(&out, "\\u00")
+            a.push(&out, sc.HEX[@as(i64, c >> 4)])
+            a.push(&out, sc.HEX[@as(i64, c & 15)])
+        } else {
+            a.push(&out, c)
+        }
+    }
+    a.push(&out, '"')
+}
+
+// An integer as a JSON string: OTLP's JSON writes 64-bit integers so.
+fn append_int_string(a: Allocator, inout out: Buf(u8), n: i64) void {
+    a.push(&out, '"')
+    a.append_int(&out, n)
+    a.push(&out, '"')
+}
+
+fn append_value(a: Allocator, inout out: Buf(u8), v: sp.Value) void {
+    switch (v) {
+        .text => |t| {
+            a.append_str(&out, "{\"stringValue\":")
+            append_string(a, &out, t)
+        }
+        .int => |n| {
+            a.append_str(&out, "{\"intValue\":")
+            append_int_string(a, &out, n)
+        }
+        .float => |x| {
+            a.append_str(&out, "{\"doubleValue\":")
+            // JSON has no NaN or infinities; proto3's JSON spells them so.
+            if (x != x) {
+                a.append_str(&out, "\"NaN\"")
+            } else if (x > 1.7976931348623157e308) {
+                a.append_str(&out, "\"Infinity\"")
+            } else if (x < -1.7976931348623157e308) {
+                a.append_str(&out, "\"-Infinity\"")
+            } else {
+                a.append_float(&out, x)
+            }
+        }
+        .boolean => |b| {
+            a.append_str(&out, if (b) "{\"boolValue\":true" else "{\"boolValue\":false")
+        }
+    }
+    a.push(&out, '}')
+}
+
+fn append_attrs(a: Allocator, inout out: Buf(u8), attrs: []sp.Attr) void {
+    a.push(&out, '[')
+    var i = 0
+    while (i < @len(attrs)) {
+        if (i > 0) {
+            a.push(&out, ',')
+        }
+        a.append_str(&out, "{\"key\":")
+        append_string(a, &out, attrs[i].key)
+        a.append_str(&out, ",\"value\":")
+        append_value(a, &out, attrs[i].value)
+        a.push(&out, '}')
+        i = i + 1
+    }
+    a.push(&out, ']')
+}
+
+// SPAN_KIND_INTERNAL is 1, and so on in the order of sp.Kind.
+fn kind_number(k: sp.Kind) i64 {
+    switch (k) {
+        .internal => { return 1 }
+        .server => { return 2 }
+        .client => { return 3 }
+        .producer => { return 4 }
+        .consumer => { return 5 }
+    }
+}
+
+fn status_number(s: sp.Status) i64 {
+    switch (s) {
+        .unset => { return 0 }
+        .ok => { return 1 }
+        .failed => { return 2 }
+    }
+}
+
+fn append_span(a: Allocator, inout out: Buf(u8), s: sp.Span) void {
+    a.append_str(&out, "{\"traceId\":\"")
+    sc.append_hex(a, &out, s.ctx.trace_id[0..])
+    a.append_str(&out, "\",\"spanId\":\"")
+    sc.append_hex(a, &out, s.ctx.span_id[0..])
+    a.push(&out, '"')
+    if (s.parent.valid) {
+        a.append_str(&out, ",\"parentSpanId\":\"")
+        sc.append_hex(a, &out, s.parent.span_id[0..])
+        a.push(&out, '"')
+    }
+    // Bit 8 (CONTEXT_HAS_IS_REMOTE) and bit 9 (IS_REMOTE): whether the
+    // parent came from another process; the low byte, the trace flags.
+    var flags = if (s.ctx.sampled) 1 else 0
+    if (s.parent.valid) {
+        flags = flags | 256
+        if (s.parent.remote) {
+            flags = flags | 512
+        }
+    }
+    a.append_str(&out, ",\"flags\":")
+    a.append_int(&out, flags)
+    a.append_str(&out, ",\"name\":")
+    append_string(a, &out, s.name)
+    a.append_str(&out, ",\"kind\":")
+    a.append_int(&out, kind_number(s.kind))
+    a.append_str(&out, ",\"startTimeUnixNano\":")
+    append_int_string(a, &out, s.start)
+    a.append_str(&out, ",\"endTimeUnixNano\":")
+    append_int_string(a, &out, s.end)
+    a.append_str(&out, ",\"attributes\":")
+    append_attrs(a, &out, s.attrs[0..])
+    a.append_str(&out, ",\"events\":[")
+    var i = 0
+    while (i < @len(s.events)) {
+        if (i > 0) {
+            a.push(&out, ',')
+        }
+        a.append_str(&out, "{\"timeUnixNano\":")
+        append_int_string(a, &out, s.events[i].time)
+        a.append_str(&out, ",\"name\":")
+        append_string(a, &out, s.events[i].name)
+        a.append_str(&out, ",\"attributes\":")
+        append_attrs(a, &out, s.events[i].attrs[0..])
+        a.push(&out, '}')
+        i = i + 1
+    }
+    a.append_str(&out, "],\"status\":{\"code\":")
+    a.append_int(&out, status_number(s.status))
+    if (@len(s.message) > 0) {
+        a.append_str(&out, ",\"message\":")
+        append_string(a, &out, s.message)
+    }
+    a.append_str(&out, "}}")
+}
+
+// The body of POST /v1/traces for spans of one service.
+fn encode(a: Allocator, service: []u8, spans: []sp.Span) Buf(u8) {
+    var out: Buf(u8) = .empty
+    a.append_str(&out, "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":")
+    append_string(a, &out, service)
+    a.append_str(&out, "}},{\"key\":\"telemetry.sdk.name\",\"value\":{\"stringValue\":\"egg-otel\"}},{\"key\":\"telemetry.sdk.language\",\"value\":{\"stringValue\":\"egg\"}},{\"key\":\"telemetry.sdk.version\",\"value\":{\"stringValue\":\"")
+    a.append_str(&out, VERSION)
+    a.append_str(&out, "\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"otel\",\"version\":\"")
+    a.append_str(&out, VERSION)
+    a.append_str(&out, "\"},\"spans\":[")
+    var i = 0
+    while (i < @len(spans)) {
+        if (i > 0) {
+            a.push(&out, ',')
+        }
+        append_span(a, &out, spans[i])
+        i = i + 1
+    }
+    a.append_str(&out, "]}]}]}")
+    return out
+}

@@ -1,0 +1,48 @@
+// The OTLP/HTTP JSON body for fixed spans: ids, times, kinds, attributes
+// of each type, events, status, a remote parent, and text that needs
+// escaping.
+uses alloc, io
+
+const otel = @import("otel")
+const sp = @import("otel/span")
+const otlp = @import("otel/otlp")
+
+fn span(a: Allocator, name: []u8, kind: otel.Kind, parent: otel.SpanContext, id: u8) otel.Span {
+    var c = otel.none()
+    c.trace_id = @splat(0xab)
+    c.span_id = @splat(id)
+    c.sampled = true
+    c.valid = true
+    return otel.Span{ .ctx = c, .parent = parent, .name = a.concat(name, ""), .kind = kind, .start = 1700000000000000000, .end = 1700000000250000000, .attrs = .empty, .events = .empty, .status = .unset, .message = .empty }
+}
+
+fn main(io: Io, a: Allocator) void {
+    var spans: Buf(otel.Span) = .empty
+    defer a.free(spans)
+    const remote = otel.parse_traceparent("00-abababababababababababababababab-0102030405060708-01") orelse otel.none()
+    var root = span(a, "GET", .server, remote, 1)
+    root.set_text(a, "http.request.method", "GET")
+    root.set_int(a, "http.response.status_code", 200)
+    root.set_int(a, "http.response.status_code", 503)
+    root.set_float(a, "ratio", 0.25)
+    root.set_bool(a, "cached", false)
+    root.fail(a, "upstream \"down\"\n")
+    a.push(&spans, root)
+    var child = span(a, "query\tusers", .client, root_ctx(spans[0..]), 2)
+    child.set_float(a, "nan", 0.0 / 0.0)
+    child.set_float(a, "inf", 1.0 / 0.0)
+    child.set_text(a, "bytes", "\x01\x7f")
+    a.push(&child.events, sp.Event{ .name = a.concat("retry", ""), .time = 1700000000100000000, .attrs = .empty })
+    child.ok()
+    child.fail(a, "too late")
+    a.push(&spans, child)
+    const body = otlp.encode(a, "egg \"test\"", spans[0..])
+    defer a.free(body)
+    io.print(body)
+}
+
+fn root_ctx(spans: []otel.Span) otel.SpanContext {
+    var c = spans[0].ctx
+    c.remote = false
+    return c
+}

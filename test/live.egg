@@ -1,0 +1,83 @@
+// Against a real OpenTelemetry Collector (test/live.sh starts one): a
+// client span calls an HTTP server in this program, which continues the
+// trace from the traceparent it is sent. Without OTEL_LIVE_ENDPOINT it
+// does nothing, so clutch test passes without a collector.
+uses alloc, args, io, net, rand, thread, time
+
+const http = @import("std/http")
+const otel = @import("otel")
+
+fn serve(sink server: TcpListener, a: Allocator, sink tracer: otel.Tracer) void {
+    defer server.close()
+    defer tracer.close()
+    const c = server.accept() catch {
+        return
+    }
+    defer c.close()
+    var inbox: Buf(u8) = .empty
+    defer a.free(inbox)
+    const req = (http.read_request(c, a, &inbox, 65536) catch {
+        return
+    }) orelse return
+    defer req.deinit(a)
+    var span = tracer.server_span(a, req)
+    defer tracer.finish(a, span)
+    span.rename(a, "GET /hello")
+    span.set_text(a, "http.route", "/hello")
+    http.respond(c, a, req, "200 OK", "", "Content-Type: text/plain\r\n", "hi") catch {
+        span.fail(a, "cannot respond")
+        return
+    }
+    otel.http_status(a, &span, 200)
+}
+
+// A root span and a client span under it, around one request; a request
+// that fails fails its span instead of leaving the spans unfinished.
+fn traced_call(a: Allocator, tracer: otel.Tracer, net: Net, url: []u8) void {
+    var root = tracer.start(a, "live test", .internal, otel.none())
+    defer tracer.finish(a, root)
+    root.set_bool(a, "egg.live", true)
+    var call = tracer.client_span(a, "GET", url, root.context())
+    var headers: Buf(u8) = .empty
+    defer a.free(headers)
+    otel.inject(a, &headers, call.context())
+    const status = get(net, a, url, headers)
+    if (status < 0) {
+        call.fail(a, "request failed")
+    } else {
+        otel.http_status(a, &call, status)
+    }
+    tracer.finish(a, call)
+    tracer.event(a, &root, "called")
+    root.ok()
+}
+
+// The status of a GET, or -1.
+fn get(net: Net, a: Allocator, url: []u8, headers: []u8) i64 {
+    const r = http.fetch(net, a, "GET", url, headers, "", http.options()) catch {
+        return -1
+    }
+    const status = r.status
+    r.deinit(a)
+    return status
+}
+
+fn main(io: Io, env: Args, net: Net, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
+    const endpoint = env.env("OTEL_LIVE_ENDPOINT") orelse return
+    var cfg = otel.config("egg-otel-live")
+    cfg.endpoint = endpoint
+    const server = try net.tcp_listen("127.0.0.1", 0)
+    const tp = otel.provider(threads, net, a, clock, rng, cfg)
+    const tracer = tp.tracer()
+    const digits = a.int_str(server.port())
+    defer a.free(digits)
+    const url = a.concat("http://127.0.0.1:", digits, "/hello")
+    defer a.free(url)
+    const worker = threads.spawn(serve, server, a, tracer.clone())
+
+    traced_call(a, tracer, net, url)
+    worker.join()
+    tracer.close()
+    tp.shutdown()
+    io.print("sent")
+}

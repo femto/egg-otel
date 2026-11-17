@@ -1,0 +1,111 @@
+// otel/span: a span as it is recorded, until the exporter sends it. A
+// Tracer makes one (tracer.start) and takes it back (tracer.finish); in
+// between it gathers attributes, events and a status. It owns its text,
+// so the compiler holds every path to finish it (or free it).
+uses alloc
+
+const sc = @import("context.egg")
+
+const Kind = enum { internal, server, client, producer, consumer }
+
+// An attribute's value. OTLP has arrays and maps too; not these yet.
+const Value = union(enum) {
+    text: Buf(u8)
+    int: i64
+    float: f64
+    boolean: bool
+}
+
+const Attr = struct {
+    key: Buf(u8)
+    value: Value
+}
+
+const Event = struct {
+    name: Buf(u8)
+    time: i64
+    attrs: Buf(Attr)
+}
+
+const Status = enum { unset, ok, failed }
+
+const Span = struct {
+    ctx: sc.SpanContext
+    // none() for a span that starts its trace.
+    parent: sc.SpanContext
+    name: Buf(u8)
+    kind: Kind
+    // Nanoseconds since 1970, as clock.now() gives them.
+    start: i64
+    end: i64
+    attrs: Buf(Attr)
+    events: Buf(Event)
+    status: Status
+    message: Buf(u8)
+
+    fn context(self: Span) sc.SpanContext {
+        return self.ctx
+    }
+
+    // A span that is not sampled is never sent, so it keeps nothing.
+    fn recording(self: Span) bool {
+        return self.ctx.sampled
+    }
+
+    fn rename(inout self: Span, a: Allocator, name: []u8) void {
+        a.free(@replace(&self.name, a.concat(name, "")))
+    }
+
+    // Each set_ replaces the value of a key already set, as OTel asks.
+    fn set_text(inout self: Span, a: Allocator, key: []u8, v: []u8) void {
+        if (self.recording()) {
+            put(a, &self.attrs, key, Value{ .text = a.concat(v, "") })
+        }
+    }
+
+    fn set_int(inout self: Span, a: Allocator, key: []u8, v: i64) void {
+        if (self.recording()) {
+            put(a, &self.attrs, key, Value{ .int = v })
+        }
+    }
+
+    fn set_float(inout self: Span, a: Allocator, key: []u8, v: f64) void {
+        if (self.recording()) {
+            put(a, &self.attrs, key, Value{ .float = v })
+        }
+    }
+
+    fn set_bool(inout self: Span, a: Allocator, key: []u8, v: bool) void {
+        if (self.recording()) {
+            put(a, &self.attrs, key, Value{ .boolean = v })
+        }
+    }
+
+    // Status ok: the operation succeeded, as the code that made the span
+    // says; it is not changed after (OTel: ok is final).
+    fn ok(inout self: Span) void {
+        self.status = .ok
+    }
+
+    // Status error, with a message; not over an ok.
+    fn fail(inout self: Span, a: Allocator, message: []u8) void {
+        if (self.status == .ok) {
+            return
+        }
+        self.status = .failed
+        a.free(@replace(&self.message, a.concat(message, "")))
+    }
+}
+
+// key = v in attrs, replacing what key had.
+fn put(a: Allocator, inout attrs: Buf(Attr), key: []u8, sink v: Value) void {
+    var i = 0
+    while (i < @len(attrs)) {
+        if (attrs[i].key == key) {
+            a.free(@replace(&attrs[i].value, v))
+            return
+        }
+        i = i + 1
+    }
+    a.push(&attrs, Attr{ .key = a.concat(key, ""), .value = v })
+}

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # The oldest Egg this package supports (README): tx.try_send came in
+  # femto/egg#133, after 0.2.1.
+  EGG_REPO: femto/egg
+  EGG_REF: 3104c866888df12e1781406110476c054df7074e # main after #133
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CC: ${{ matrix.os == 'windows-latest' && 'gcc' || 'cc' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ env.EGG_REPO }}
+          ref: ${{ env.EGG_REF }}
+          path: .egg
+          persist-credentials: false
+      # Egg's eggc and clutch run on Ruby; on Windows, setup-ruby's MSYS2
+      # gcc compiles the C.
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: "3.3"
+      - name: clutch test
+        run: ruby .egg/bin/clutch test
+      # The spans through a real OpenTelemetry Collector (Docker: Linux only).
+      - name: Against the OpenTelemetry Collector
+        if: matrix.os == 'ubuntu-latest'
+        run: CLUTCH="$PWD/.egg/bin/clutch" sh test/live.sh

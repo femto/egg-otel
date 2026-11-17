@@ -1,0 +1,110 @@
+// otel/context: what identifies a span across processes, and its W3C
+// Trace Context form, the traceparent header:
+// "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".
+uses alloc
+
+const HEX = "0123456789abcdef"
+
+// A span's identity: its trace and its own id, and whether the trace is
+// sampled. valid is false for none(): a span with that parent starts a
+// trace. remote: it came from another process (a traceparent).
+const SpanContext = struct {
+    trace_id: [16]u8
+    span_id: [8]u8
+    sampled: bool
+    valid: bool
+    remote: bool
+}
+
+fn none() SpanContext {
+    return SpanContext{ .trace_id = @splat(0), .span_id = @splat(0), .sampled = false, .valid = false, .remote = false }
+}
+
+// Bytes as lower-case hex at the end of out.
+fn append_hex(a: Allocator, inout out: Buf(u8), bytes: []u8) void {
+    for (bytes) |b| {
+        a.push(&out, HEX[@as(i64, b >> 4)])
+        a.push(&out, HEX[@as(i64, b & 15)])
+    }
+}
+
+fn hex_value(c: u8) i64 {
+    if (c >= '0' and c <= '9') {
+        return @as(i64, c - '0')
+    }
+    if (c >= 'a' and c <= 'f') {
+        return @as(i64, c - 'a') + 10
+    }
+    return -1
+}
+
+// The 2n lower-case hex digits at s[i] into out (n bytes); false if they
+// are not all such digits (W3C Trace Context allows no upper case).
+fn read_hex(s: []u8, i: i64, inout out: []u8) bool {
+    var k = 0
+    while (k < @len(out)) {
+        const hi = hex_value(s[i + 2 * k])
+        const lo = hex_value(s[i + 2 * k + 1])
+        if (hi < 0 or lo < 0) {
+            return false
+        }
+        out[k] = @as(u8, hi * 16 + lo)
+        k = k + 1
+    }
+    return true
+}
+
+fn all_zero(bytes: []u8) bool {
+    for (bytes) |b| {
+        if (b != 0) {
+            return false
+        }
+    }
+    return true
+}
+
+// The context a traceparent header carries, remote; null for anything
+// that is not one: a version other than 2 hex digits, ff, ids that are
+// all zero or not lower-case hex, or version 00 with anything after the
+// flags. A later version may add fields after a '-' (W3C Trace Context
+// 1, section 3.3), which are skipped; only the sampled flag is read.
+fn parse_traceparent(s: []u8) ?SpanContext {
+    if (@len(s) < 55 or s[2] != '-' or s[35] != '-' or s[52] != '-') {
+        return null
+    }
+    var version: [1]u8 = @splat(0)
+    var flags: [1]u8 = @splat(0)
+    var c = none()
+    if (!read_hex(s, 0, &version[0..]) or version[0] == 0xff) {
+        return null
+    }
+    if (!read_hex(s, 3, &c.trace_id[0..]) or !read_hex(s, 36, &c.span_id[0..]) or !read_hex(s, 53, &flags[0..])) {
+        return null
+    }
+    if (version[0] == 0 and @len(s) != 55) {
+        return null
+    }
+    if (@len(s) > 55 and s[55] != '-') {
+        return null
+    }
+    if (all_zero(c.trace_id[0..]) or all_zero(c.span_id[0..])) {
+        return null
+    }
+    c.sampled = (flags[0] & 1) == 1
+    c.valid = true
+    c.remote = true
+    return c
+}
+
+// c as a traceparent value (version 00) at the end of out; nothing for a
+// context that is not valid.
+fn append_traceparent(a: Allocator, inout out: Buf(u8), c: SpanContext) void {
+    if (!c.valid) {
+        return
+    }
+    a.append_str(&out, "00-")
+    append_hex(a, &out, c.trace_id[0..])
+    a.push(&out, '-')
+    append_hex(a, &out, c.span_id[0..])
+    a.append_str(&out, if (c.sampled) "-01" else "-00")
+}

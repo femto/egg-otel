@@ -1,0 +1,10 @@
+quiet recording: false
+true
+true
+requests: 2
+spans: 3
+roots: 1
+root 1, child 1, grandchild 1, quiet 0
+one trace: 3 3
+event: 1
+statuses: ok 1, error 1

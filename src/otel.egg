@@ -1,0 +1,282 @@
+// otel: OpenTelemetry traces for Egg. Spans go to a collector over
+// OTLP/HTTP (JSON), batched by a thread of their own; W3C traceparent
+// carries a trace from process to process.
+//
+//     var tp = otel.provider(threads, net, a, clock, rng, otel.config("my-service"))
+//     defer tp.shutdown()                 // after every tracer has closed
+//     const tracer = tp.tracer()          // one per thread: tracer.clone()
+//     defer tracer.close()
+//
+//     var span = tracer.start(a, "load user", .internal, parent)
+//     defer tracer.finish(a, span)        // the compiler holds every path to it
+//     span.set_int(a, "user.id", 42)
+//
+// A span is owned, so one that is never finished does not compile.
+// finish hands it to the exporter without waiting: when the queue is
+// full, the span is dropped rather than the request held up.
+//
+// Code that starts and finishes spans reads the clock and random bytes
+// and sends on a channel, so its module declares `uses time, rand,
+// thread`; making the provider needs net and alloc as well.
+uses alloc, net, rand, thread, time
+
+const http = @import("std/http")
+const sc = @import("context.egg")
+const sp = @import("span.egg")
+const otlp = @import("otlp.egg")
+
+const SpanContext = sc.SpanContext
+const Span = sp.Span
+const Kind = sp.Kind
+
+const VERSION = otlp.VERSION
+
+// Where and how spans go. service names this program in the collector
+// (service.name); endpoint is the collector's OTLP/HTTP base (spans go to
+// endpoint/v1/traces, http:// only for now); batch spans go in one
+// request, at most interval_ms apart while there are any; queue is how
+// many may wait for the exporter before more are dropped; ratio, the
+// share of new traces sampled (a span with a parent follows the
+// parent's choice).
+const Config = struct {
+    service: str
+    endpoint: str
+    batch: i64
+    queue: i64
+    interval_ms: i64
+    timeout_ms: i64
+    ratio: f64
+}
+
+// The defaults of OTel's batch span processor and OTLP exporter.
+fn config(service: str) Config {
+    return Config{ .service = service, .endpoint = "http://localhost:4318", .batch = 512, .queue = 2048, .interval_ms = 5000, .timeout_ms = 10000, .ratio = 1.0 }
+}
+
+fn none() SpanContext {
+    return sc.none()
+}
+
+fn parse_traceparent(s: []u8) ?SpanContext {
+    return sc.parse_traceparent(s)
+}
+
+// The exporter thread and the sending end tracers clone.
+const Provider = owned struct {
+    worker: Thread
+    tx: Sender(Span)
+    clock: Clock
+    rng: Random
+    ratio: f64
+
+    // A tracer for one thread; close it before shutdown.
+    fn tracer(self: Provider) Tracer {
+        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio }
+    }
+
+    // Sends what is left and stops the exporter. It waits for the last
+    // tracer to close: spans can come until then.
+    fn shutdown(sink self: Provider) void {
+        self.tx.close()
+        self.worker.join()
+        @forget(self)
+    }
+}
+
+fn provider(threads: Threads, net: Net, a: Allocator, clock: Clock, rng: Random, cfg: Config) Provider {
+    const rx = threads.channel(Span, cfg.queue)
+    const tx = rx.sender()
+    const worker = threads.spawn(export_loop, rx, net, a, clock, cfg)
+    return Provider{ .worker = worker, .tx = tx, .clock = clock, .rng = rng, .ratio = cfg.ratio }
+}
+
+const Tracer = owned struct {
+    tx: Sender(Span)
+    clock: Clock
+    rng: Random
+    ratio: f64
+
+    // Another tracer on the same exporter, for another thread.
+    fn clone(self: Tracer) Tracer {
+        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio }
+    }
+
+    fn close(sink self: Tracer) void {
+        self.tx.close()
+        @forget(self)
+    }
+
+    // A span started now, a child of parent (none() to start a trace).
+    // A new trace is sampled at the configured ratio; a child is as its
+    // parent is. A span that is not sampled still has a context to pass
+    // on, but records nothing and is never sent.
+    fn start(self: Tracer, a: Allocator, name: []u8, kind: Kind, parent: SpanContext) Span {
+        var c = sc.none()
+        if (parent.valid) {
+            c.trace_id = parent.trace_id
+            c.sampled = parent.sampled
+        } else {
+            self.rng.fill(&c.trace_id[0..])
+            if (sc.all_zero(c.trace_id[0..])) {
+                c.trace_id[15] = 1
+            }
+            c.sampled = sampled(c.trace_id, self.ratio)
+        }
+        self.rng.fill(&c.span_id[0..])
+        if (sc.all_zero(c.span_id[0..])) {
+            c.span_id[7] = 1
+        }
+        c.valid = true
+        return Span{ .ctx = c, .parent = parent, .name = a.concat(name, ""), .kind = kind, .start = self.clock.now(), .end = 0, .attrs = .empty, .events = .empty, .status = .unset, .message = .empty }
+    }
+
+    // Ends the span now and hands it to the exporter, without waiting:
+    // with the queue full, or the exporter gone, it is dropped.
+    fn finish(self: Tracer, a: Allocator, sink span: Span) void {
+        if (!span.recording()) {
+            a.free(span)
+            return
+        }
+        var s = span
+        s.end = self.clock.now()
+        switch (self.tx.try_send(s)) {
+            .sent => {}
+            .full => |back| {
+                a.free(back)
+            }
+            .closed => |back| {
+                a.free(back)
+            }
+        }
+    }
+
+    // An event at this moment in span's life.
+    fn event(self: Tracer, a: Allocator, inout span: Span, name: []u8) void {
+        if (span.recording()) {
+            a.push(&span.events, sp.Event{ .name = a.concat(name, ""), .time = self.clock.now(), .attrs = .empty })
+        }
+    }
+
+    // A server span for an HTTP request, a child of the traceparent it
+    // came with (if any), named by its method as OTel's HTTP conventions
+    // say when the route is not known (rename it to "GET /users/{id}").
+    fn server_span(self: Tracer, a: Allocator, req: http.Request) Span {
+        const parent = sc.parse_traceparent(http.header(req, "traceparent") orelse "") orelse sc.none()
+        var s = self.start(a, req.method, .server, parent)
+        s.set_text(a, "http.request.method", req.method)
+        s.set_text(a, "url.scheme", "http")
+        s.set_text(a, "url.path", req.path)
+        if (@len(req.query) > 0) {
+            s.set_text(a, "url.query", req.query)
+        }
+        if (@len(req.host) > 0) {
+            s.set_text(a, "server.address", req.host)
+        }
+        if (@len(req.peer_ip) > 0) {
+            s.set_text(a, "client.address", req.peer_ip)
+        }
+        return s
+    }
+
+    // A client span for a request this program makes; put its context in
+    // the request's headers with inject.
+    fn client_span(self: Tracer, a: Allocator, method: []u8, url: []u8, parent: SpanContext) Span {
+        var s = self.start(a, method, .client, parent)
+        s.set_text(a, "http.request.method", method)
+        s.set_text(a, "url.full", url)
+        return s
+    }
+}
+
+// The status of an HTTP response on its span: a server's 5xx is an error,
+// a client's 4xx and 5xx (OTel's HTTP conventions).
+fn http_status(a: Allocator, inout span: Span, code: i64) void {
+    span.set_int(a, "http.response.status_code", code)
+    const limit = if (span.kind == .client) 400 else 500
+    if (code >= limit) {
+        span.fail(a, "")
+    }
+}
+
+// "traceparent: ...\r\n" for c at the end of headers, as std/http's
+// fetch and send_request take them; nothing for a context that is not
+// valid.
+fn inject(a: Allocator, inout headers: Buf(u8), c: SpanContext) void {
+    if (!c.valid) {
+        return
+    }
+    a.append_str(&headers, "traceparent: ")
+    sc.append_traceparent(a, &headers, c)
+    a.append_str(&headers, "\r\n")
+}
+
+// TraceIdRatioBased: the trace id's last 8 bytes, as a number below
+// 2^63, under ratio of 2^63; so every service decides the same for a
+// trace. Compared as integers: an f64 rounds ids near the bound onto it.
+fn sampled(id: [16]u8, ratio: f64) bool {
+    if (ratio >= 1.0) {
+        return true
+    }
+    if (ratio <= 0.0) {
+        return false
+    }
+    const bound = @as(u64, ratio * 9223372036854775808.0)
+    var x: u64 = 0
+    var i = 8
+    while (i < 16) {
+        x = (x << 8) | @as(u64, id[i])
+        i = i + 1
+    }
+    return (x >> 1) < bound
+}
+
+// The exporter thread: spans into batches, a batch to the collector when
+// it is full or interval_ms after the last one went, and what is left
+// when every sender has closed.
+fn export_loop(sink rx: Receiver(Span), net: Net, a: Allocator, clock: Clock, cfg: Config) void {
+    defer rx.close()
+    var batch: Buf(Span) = .empty
+    defer a.free(batch)
+    const url = a.concat(cfg.endpoint, "/v1/traces")
+    defer a.free(url)
+    var last = clock.monotonic()
+    while (true) {
+        const waited = (clock.monotonic() - last) / 1000000
+        const left = if (waited >= cfg.interval_ms) 0 else cfg.interval_ms - waited
+        select {
+            rx => |s| {
+                a.push(&batch, s)
+                if (@len(batch) >= cfg.batch) {
+                    send_batch(net, a, url, cfg, &batch)
+                    last = clock.monotonic()
+                }
+            }
+            timeout(left) => {
+                if (@len(batch) > 0) {
+                    send_batch(net, a, url, cfg, &batch)
+                }
+                last = clock.monotonic()
+            }
+            closed => {
+                break
+            }
+        }
+    }
+    if (@len(batch) > 0) {
+        send_batch(net, a, url, cfg, &batch)
+    }
+}
+
+// One POST of the batch, which is emptied whether it got there or not:
+// telemetry that cannot be sent is let go, not kept to grow.
+fn send_batch(net: Net, a: Allocator, url: []u8, cfg: Config, inout batch: Buf(Span)) void {
+    const body = otlp.encode(a, cfg.service, batch[0..])
+    defer a.free(body)
+    a.free(@take(&batch))
+    var opts = http.options()
+    opts.timeout_ms = cfg.timeout_ms
+    const r = http.fetch(net, a, "POST", url, "Content-Type: application/json\r\n", body, opts) catch {
+        return
+    }
+    r.deinit(a)
+}

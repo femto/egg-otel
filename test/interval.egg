@@ -1,0 +1,48 @@
+// A batch that never fills still goes interval_ms after the last one: one
+// span, a batch of 512, every 100 ms, reaches the collector before
+// shutdown.
+uses alloc, io, net, rand, thread, time
+
+const http = @import("std/http")
+const otel = @import("otel")
+
+fn collector(sink server: TcpListener, a: Allocator, sink out: Sender(Buf(u8))) void {
+    defer server.close()
+    defer out.close()
+    const c = server.accept() catch {
+        return
+    }
+    defer c.close()
+    var inbox: Buf(u8) = .empty
+    defer a.free(inbox)
+    const req = (http.read_request(c, a, &inbox, 1048576) catch {
+        return
+    }) orelse return
+    defer req.deinit(a)
+    http.respond(c, a, req, "200 OK", "", "", "{}") catch {}
+    out.send(a.concat(req.body, ""))
+}
+
+fn main(io: Io, net: Net, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
+    const server = try net.tcp_listen("127.0.0.1", 0)
+    const digits = a.int_str(server.port())
+    const url = a.concat("http://127.0.0.1:", digits)
+    a.free(digits)
+    var cfg = otel.config("interval-test")
+    cfg.endpoint = a.leak(url)
+    a.free(url)
+    cfg.interval_ms = 100
+    const bodies = threads.channel(Buf(u8), 1)
+    const got = threads.spawn(collector, server, a, bodies.sender())
+    const tp = otel.provider(threads, net, a, clock, rng, cfg)
+    const tracer = tp.tracer()
+    tracer.finish(a, tracer.start(a, "lonely", .internal, otel.none()))
+    // Before shutdown: only the timer can have sent it.
+    const b = bodies.recv_timeout(10000) orelse a.concat("nothing", "")
+    io.print("sent by the timer: ", @len(b) > 0 and b[0] == '{')
+    a.free(b)
+    tracer.close()
+    tp.shutdown()
+    got.join()
+    bodies.close()
+}

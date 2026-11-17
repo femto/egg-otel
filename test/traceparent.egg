@@ -1,0 +1,44 @@
+// W3C Trace Context traceparent: what parses, what does not, and what
+// is written back.
+uses alloc, io
+
+const otel = @import("otel")
+
+fn show(io: Io, a: Allocator, s: []u8) void {
+    if (otel.parse_traceparent(s)) |c| {
+        var out: Buf(u8) = .empty
+        defer a.free(out)
+        otel.inject(a, &out, c)
+        io.print("ok ", c.sampled, " ", c.remote, " ", out[0..@len(out) - 2])
+    } else {
+        io.print("no ", s)
+    }
+}
+
+fn main(io: Io, a: Allocator) void {
+    // The W3C examples, sampled and not.
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00")
+    // Other flags are kept apart from sampled.
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-03")
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-02")
+    // A later version may add fields after a '-'.
+    show(io, a, "cc-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-what-the-future")
+    show(io, a, "cc-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+    // Not traceparents.
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-")
+    show(io, a, "cc-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01x")
+    show(io, a, "ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+    show(io, a, "00-00000000000000000000000000000000-b7ad6b7169203331-01")
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01")
+    show(io, a, "00-0AF7651916CD43DD8448EB211C80319C-b7ad6b7169203331-01")
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0g")
+    show(io, a, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b716920333-01")
+    show(io, a, "00_0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+    show(io, a, "")
+    // Nothing is injected for no context.
+    var none: Buf(u8) = .empty
+    defer a.free(none)
+    otel.inject(a, &none, otel.none())
+    io.print("none: ", @len(none))
+}

@@ -1,0 +1,26 @@
+// TraceIdRatioBased on the trace id's last 8 bytes: all of them at ratio
+// 1, none at 0, and at 0.5 the ids below half of 2^64 (shifted to 63 bits).
+uses io
+
+const otel = @import("otel")
+
+fn id(low: u64) [16]u8 {
+    var b: [16]u8 = @splat(0xee)
+    var v = low
+    var i = 15
+    while (i >= 8) {
+        b[i] = @as(u8, v & 255)
+        v = v >> 8
+        i = i - 1
+    }
+    return b
+}
+
+fn main(io: Io) void {
+    io.print(otel.sampled(id(18446744073709551615), 1.0), " ", otel.sampled(id(0), 0.0))
+    // At 0.5 the bound is 2^62: ids whose 63-bit part is just below it are
+    // in, at it are out.
+    io.print(otel.sampled(id(0), 0.5), " ", otel.sampled(id(9223372036854775807), 0.5), " ", otel.sampled(id(9223372036854775808), 0.5), " ", otel.sampled(id(18446744073709551615), 0.5))
+    // At 0.25, 2^61.
+    io.print(otel.sampled(id(4611686018427387902), 0.25), " ", otel.sampled(id(4611686018427387904), 0.25), " ", otel.sampled(id(0), 0.000001))
+}
