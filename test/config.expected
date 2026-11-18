@@ -17,6 +17,8 @@ true true
 True: true
 true false false [https://ok.example] []
 true false false [Authorization=Bearer abc]
+false false [Authorization=Bearer abc]
+https://collector.example/custom
 https://collector.example/ingest/v1/traces?tenant=a#top
 http://collector.example:4318/v1/traces
 http://collector.example/v1/traces
@@ -32,3 +34,4 @@ http://collector.example/v1/traces
 [x%20team=core] -> BadHeaders
 [Content-Type=application/x-protobuf, Authorization=Bearer x] -> [Authorization: Bearer x\r\n]
 [content%2Dtype=text/plain,x-team=core] -> [x-team: core\r\n]
+[Content-Length=0,TRANSFER-ENCODING=chunked,Host=evil.example,connection=keep-alive,Authorization=Bearer x] -> [Authorization: Bearer x\r\n]

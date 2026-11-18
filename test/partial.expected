@@ -8,4 +8,15 @@
 0  {"list":[{"partialSuccess":{"rejectedSpans":2}}],"partialSuccess":{}}
 2  {"partialSuccess":{"rejectedSpans":"7"}}
 0  {"partialSuccess":"rejectedSpans"}
-1  {"partialSuccess":{"rejectedSpans":"1"
+0  {"partialSuccess":{"rejectedSpans":"1"
+0  {"partialSuccess":{"rejectedSpans":"1"}} trailing
+1  {"partialSuccess":{"rejected\u0053pans":"1"}}
+1  {"partial\u0053uccess":{"rejectedSpans":1}}
+10 of 20  {"partialSuccess":{"rejectedSpans":1e1}}
+10 of 20  {"partialSuccess":{"rejectedSpans":"1.0E1"}}
+10 of 20  {"partialSuccess":{"rejectedSpans":"100e-1"}}
+12 of 20  {"partialSuccess":{"rejectedSpans":"12"}}
+0 of 20  {"partialSuccess":{"rejectedSpans":"1oops"}}
+0 of 20  {"partialSuccess":{"rejectedSpans":1.5}}
+0 of 20  {"partialSuccess":{"rejectedSpans":-3}}
+0 of 20  {"partialSuccess":{"rejectedSpans":"\u0031"}}

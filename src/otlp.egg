@@ -3,6 +3,7 @@
 // hex, 64-bit integers as strings, enums as numbers).
 uses alloc
 
+const text = @import("std/text")
 const sc = @import("context.egg")
 const sp = @import("span.egg")
 
@@ -185,29 +186,141 @@ fn encode(a: Allocator, service: []u8, spans: []sp.Span) Buf(u8) {
 }
 
 // How many of n spans an OTLP response body says it rejected: its
-// partialSuccess.rejectedSpans (an int64, so a string in JSON, or a
-// number), at most n; 0 when it says none, or nothing that parses. The
-// JSON is walked, not searched, so a field of the same name elsewhere
-// ({"extension":{"rejectedSpans":0},...}) is not taken for it.
+// partialSuccess.rejectedSpans, at most n; 0 when it says none, or the
+// body is not one whole JSON object. The JSON is walked, not searched,
+// so a field of the same name elsewhere ({"extension":{"rejectedSpans":
+// 0},...}) is not taken for it, and member names are compared decoded
+// ("rejected\u0053pans" is the same name). The count is an int64 in
+// ProtoJSON: a string or a number, exponents allowed ("1e1" is 10), but
+// a whole one: "1oops" counts nothing.
 fn rejected_spans(body: []u8, n: i64) i64 {
     const top = blank(body, 0)
+    if (top >= @len(body) or body[top] != '{') {
+        return 0
+    }
+    const end = after_value(body, top)
+    if (end < 0 or blank(body, end) != @len(body)) {
+        return 0
+    }
     const p = member(body, top, "partialSuccess")
     if (p < 0 or body[p] != '{') {
         return 0
     }
-    var q = member(body, p, "rejectedSpans")
+    const q = member(body, p, "rejectedSpans")
     if (q < 0) {
         return 0
     }
+    var lo = q
+    var hi = after_value(body, q)
+    if (hi < 0) {
+        return 0
+    }
     if (body[q] == '"') {
-        q = q + 1
+        lo = q + 1
+        hi = hi - 1
     }
-    var count = 0
-    while (q < @len(body) and body[q] >= '0' and body[q] <= '9' and count <= n) {
-        count = count * 10 + @as(i64, body[q] - '0')
-        q = q + 1
-    }
+    const count = integer(body[lo..hi]) orelse return 0
     return if (count > n) n else count
+}
+
+// A ProtoJSON integer that is not negative: digits, a fraction and an
+// exponent allowed as long as the value is whole ("10", "1e1", "1.0e1",
+// "100e-1"); null for anything else. One past any batch is as good as
+// the exact value, since the caller caps it.
+fn integer(t: []u8) ?i64 {
+    if (@len(t) == 0 or t[0] < '0' or t[0] > '9') {
+        return null
+    }
+    var seen_e = false
+    var i = 0
+    while (i < @len(t)) {
+        const c = t[i]
+        const sign = (c == '+' or c == '-') and i > 0 and (t[i - 1] == 'e' or t[i - 1] == 'E')
+        if ((c >= '0' and c <= '9') or c == '.' or sign) {
+            i = i + 1
+            continue
+        }
+        if ((c == 'e' or c == 'E') and !seen_e) {
+            seen_e = true
+            i = i + 1
+            continue
+        }
+        return null
+    }
+    const v = text.parse_float(t) orelse return null
+    if (v < 0.0 or v != v) {
+        return null
+    }
+    if (v >= 9.0e18) {
+        return 9000000000000000000
+    }
+    const whole = @as(i64, v)
+    if (@as(f64, whole) != v) {
+        return null
+    }
+    return whole
+}
+
+// Does the JSON string s[from..to] (inside its quotes) decode to key,
+// which is ASCII? Escapes \", \\, \/ and \uXXXX are decoded; any other
+// escape (\n and the like) is a character no member name here has.
+fn name_is(s: []u8, from: i64, to: i64, key: []u8) bool {
+    var i = from
+    var k = 0
+    while (i < to) {
+        var c = s[i]
+        if (c == '\\') {
+            if (i + 1 >= to) {
+                return false
+            }
+            const e = s[i + 1]
+            if (e == 'u') {
+                if (i + 5 >= to) {
+                    return false
+                }
+                var code = 0
+                var j = i + 2
+                while (j < i + 6) {
+                    const d = hex(s[j])
+                    if (d < 0) {
+                        return false
+                    }
+                    code = code * 16 + d
+                    j = j + 1
+                }
+                if (code >= 128) {
+                    return false
+                }
+                c = @as(u8, code)
+                i = i + 6
+            } else if (e == '"' or e == '\\' or e == '/') {
+                c = e
+                i = i + 2
+            } else {
+                return false
+            }
+        } else {
+            i = i + 1
+        }
+        if (k >= @len(key) or c != key[k]) {
+            return false
+        }
+        k = k + 1
+    }
+    return k == @len(key)
+}
+
+fn hex(c: u8) i64 {
+    if (c >= '0' and c <= '9') {
+        return @as(i64, c - '0')
+    }
+    if (c >= 'a' and c <= 'f') {
+        return @as(i64, c - 'a') + 10
+    }
+    if (c >= 'A' and c <= 'F') {
+        return @as(i64, c - 'A') + 10
+    }
+    return -1
 }
 
 // Past the JSON whitespace at s[i].
@@ -286,13 +399,13 @@ fn member(s: []u8, i: i64, key: []u8) i64 {
         if (k_end < 0) {
             return -1
         }
-        const name = s[j + 1..k_end - 1]
+        const name_from = j + 1
         j = blank(s, k_end)
         if (j >= @len(s) or s[j] != ':') {
             return -1
         }
         j = blank(s, j + 1)
-        if (name == key) {
+        if (name_is(s, name_from, k_end - 1, key)) {
             return if (j < @len(s)) j else -1
         }
         j = after_value(s, j)

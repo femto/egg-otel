@@ -53,7 +53,10 @@ fn config_from_env(env: Args, service: str) Config {
     var arg: str = ""
     var disabled: str = ""
     for (names) |name| {
-        if (env.env(name)) |v| {
+        // An empty variable is as if unset (the spec), so it replaces
+        // nothing: TRACES_HEADERS="" keeps the general headers.
+        const v = env.env(name) orelse continue
+        if (@len(text.strip(v)) > 0) {
             if (name == "OTEL_TRACES_SAMPLER") {
                 sampler = v
             } else if (name == "OTEL_TRACES_SAMPLER_ARG") {
@@ -79,12 +82,14 @@ fn settle(inout c: Config, sampler: []u8, arg: []u8, disabled: []u8) void {
 }
 
 // One environment variable's setting into c (not the sampler's, which
-// sample takes): false if it is not one, or its value does not parse.
+// sample takes): false if it is not one, or its value is empty or does
+// not parse, which leaves what c had.
 fn apply(inout c: Config, name: []u8, v: str) bool {
+    // Empty is as if unset (the spec): it replaces nothing.
+    if (@len(text.strip(v)) == 0) {
+        return false
+    }
     if (name == "OTEL_SERVICE_NAME") {
-        if (@len(v) == 0) {
-            return false
-        }
         c.service = v
     } else if (name == "OTEL_EXPORTER_OTLP_ENDPOINT" or name == "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") {
         // One that is not a URL leaves what was there, which may be good.
@@ -160,8 +165,10 @@ fn sample(inout c: Config, sampler: []u8, arg: []u8) bool {
 // at the end of its path (one slash between, whatever the path ends
 // with), before any ?query or #fragment it has.
 fn traces_url(a: Allocator, c: Config) Buf(u8) {
-    if (@len(c.traces_endpoint) > 0) {
-        return a.concat(c.traces_endpoint, "")
+    // As it is, but for the spaces around it, which have no place in a
+    // request line.
+    if (@len(text.strip(c.traces_endpoint)) > 0) {
+        return a.concat(text.strip(c.traces_endpoint), "")
     }
     const base = c.endpoint
     var lo = 0
@@ -302,9 +309,8 @@ fn pair_ok(key: []u8, value: []u8) bool {
     return true
 }
 
-// Is key, decoded, Content-Type in any case? The exporter sends its own.
-fn is_content_type(key: []u8) bool {
-    const want = "content-type"
+// Is key, decoded, want in any case?
+fn key_is(key: []u8, want: []u8) bool {
     var i = 0
     var k = 0
     while (i < @len(key)) {
@@ -315,6 +321,12 @@ fn is_content_type(key: []u8) bool {
         k = k + 1
     }
     return k == @len(want)
+}
+
+// A field the request writer owns: the body's type, which is JSON, and
+// its framing (length, chunking, host, connection), which std/http sets.
+fn reserved(key: []u8) bool {
+    return key_is(key, "content-type") or key_is(key, "content-length") or key_is(key, "transfer-encoding") or key_is(key, "host") or key_is(key, "connection")
 }
 
 // Pair n of s's "key=value" pairs, as where its key and its value start
@@ -385,8 +397,9 @@ fn append_decoded(a: Allocator, inout out: Buf(u8), s: []u8) void {
 // them ("Authorization: Bearer abc\r\n" each); error.BadHeaders for a
 // pair without "=", a name that is not an HTTP token, or a value that
 // decodes to a CR, LF or NUL. Spaces around keys and values go; empty
-// pairs ("a=1,,b=2") are skipped; a Content-Type is left out, since the
-// body is JSON whatever a shared setting says.
+// pairs ("a=1,,b=2") are skipped; the fields the request writer owns
+// are left out: Content-Type (the body is JSON whatever a shared setting
+// says), Content-Length, Transfer-Encoding, Host and Connection.
 fn parse_headers(a: Allocator, s: []u8) !Buf(u8) {
     if (!headers_ok(s)) {
         return error.BadHeaders
@@ -396,7 +409,7 @@ fn parse_headers(a: Allocator, s: []u8) !Buf(u8) {
     var n = 0
     while (pair_at(s, n, &at)) {
         const key = s[at[0]..at[1]]
-        if (!is_content_type(key)) {
+        if (!reserved(key)) {
             append_decoded(a, &out, key)
             a.append_str(&out, ": ")
             append_decoded(a, &out, s[at[2]..at[3]])

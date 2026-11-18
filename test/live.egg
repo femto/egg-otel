@@ -13,6 +13,7 @@ uses alloc, args, fs, io, net, rand, thread, time
 
 const http = @import("std/http")
 const otel = @import("otel")
+const cfgm = @import("otel/config")
 
 fn serve(sink server: TcpListener, a: Allocator, sink tracer: otel.Tracer) void {
     defer server.close()
@@ -69,6 +70,12 @@ fn get(net: Net, a: Allocator, url: []u8, headers: []u8) i64 {
     return status
 }
 
+// Does the environment name a good endpoint in this variable?
+fn named(env: Args, name: str) bool {
+    const v = env.env(name) orelse return false
+    return cfgm.endpoint_ok(v)
+}
+
 fn main(io: Io, env: Args, net: Net, files: Fs, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
     var cfg = otel.config_from_env(env, "egg-otel-live")
     if (env.env("OTEL_LIVE_ENDPOINT")) |endpoint| {
@@ -77,7 +84,12 @@ fn main(io: Io, env: Args, net: Net, files: Fs, a: Allocator, threads: Threads, 
         cfg.endpoint = endpoint
         cfg.traces_endpoint = ""
         cfg.headers = ""
-    } else if (env.env("OTEL_EXPORTER_OTLP_ENDPOINT") == null and env.env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == null) {
+    } else if (!named(env, "OTEL_EXPORTER_OTLP_ENDPOINT") and !named(env, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) {
+        // Nowhere good is named: not even the default localhost:4318,
+        // which would get any token the environment holds.
+        if (env.env("OTEL_EXPORTER_OTLP_ENDPOINT") != null or env.env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != null) {
+            io.eprint("live: OTEL_EXPORTER_OTLP_(TRACES_)ENDPOINT is not an http(s) URL; nothing sent")
+        }
         return
     }
     const server = try net.tcp_listen("127.0.0.1", 0)

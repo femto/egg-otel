@@ -70,6 +70,11 @@ fn main(io: Io, a: Allocator) void {
     var h = otel.config("h")
     io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://ok.example"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "not-a-url"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://"), " [", h.endpoint, "] [", h.traces_endpoint, "]")
     io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer abc"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "novalue"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x team=core"), " [", h.headers, "]")
+    // Empty is as if unset: the token stays.
+    io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", ""), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "  "), " [", h.headers, "]")
+    // A traces endpoint with spaces around it goes without them.
+    _ = cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", " https://collector.example/custom ")
+    url(io, a, h)
     // /v1/traces at the end of the path, before a query or fragment.
     var q = otel.config("q")
     q.endpoint = "https://collector.example/ingest/?tenant=a#top"
@@ -92,4 +97,6 @@ fn main(io: Io, a: Allocator) void {
     headers(io, a, "x%20team=core")
     headers(io, a, "Content-Type=application/x-protobuf, Authorization=Bearer x")
     headers(io, a, "content%2Dtype=text/plain,x-team=core")
+    // So are the fields std/http frames the request with.
+    headers(io, a, "Content-Length=0,TRANSFER-ENCODING=chunked,Host=evil.example,connection=keep-alive,Authorization=Bearer x")
 }
