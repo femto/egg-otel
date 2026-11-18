@@ -15,7 +15,8 @@ const text = @import("std/text")
 // apart while there are any; queue is how many may wait for the exporter
 // before more are dropped; timeout_ms bounds each request; ratio is the
 // share of new traces sampled (a span with a parent follows the parent's
-// choice).
+// choice); disabled, nothing sampled at all, parent or not
+// (OTEL_SDK_DISABLED).
 const Config = struct {
     service: str
     endpoint: str
@@ -26,11 +27,12 @@ const Config = struct {
     interval_ms: i64
     timeout_ms: i64
     ratio: f64
+    disabled: bool
 }
 
 // The defaults of OTel's batch span processor and OTLP exporter.
 fn config(service: str) Config {
-    return Config{ .service = service, .endpoint = "http://localhost:4318", .traces_endpoint = "", .headers = "", .batch = 512, .queue = 2048, .interval_ms = 5000, .timeout_ms = 10000, .ratio = 1.0 }
+    return Config{ .service = service, .endpoint = "http://localhost:4318", .traces_endpoint = "", .headers = "", .batch = 512, .queue = 2048, .interval_ms = 5000, .timeout_ms = 10000, .ratio = 1.0, .disabled = false }
 }
 
 // config(service), then whatever the OpenTelemetry environment variables
@@ -40,7 +42,8 @@ fn config(service: str) Config {
 // OTEL_BSP_MAX_EXPORT_BATCH_SIZE; OTEL_TRACES_SAMPLER (always_on,
 // always_off, traceidratio and their parentbased_ forms: a child always
 // follows its parent here) with OTEL_TRACES_SAMPLER_ARG; and
-// OTEL_SDK_DISABLED=true, which samples nothing. A value that does not
+// OTEL_SDK_DISABLED=true, which samples nothing, not even a child of a
+// sampled parent. A value that does not
 // parse is ignored, as the spec asks. OTEL_EXPORTER_OTLP_PROTOCOL is not
 // read: spans go as http/json, which every OTLP/HTTP receiver takes.
 fn config_from_env(env: Args, service: str) Config {
@@ -66,12 +69,12 @@ fn config_from_env(env: Args, service: str) Config {
     return c
 }
 
-// The sampler, then OTEL_SDK_DISABLED over it: disabled samples nothing
-// whatever sampler is named.
+// The sampler, and OTEL_SDK_DISABLED beside it: disabled samples
+// nothing, whatever the sampler, and whatever a parent chose.
 fn settle(inout c: Config, sampler: []u8, arg: []u8, disabled: []u8) void {
     _ = sample(&c, sampler, arg)
     if (text.strip(disabled) == "true") {
-        c.ratio = 0.0
+        c.disabled = true
     }
 }
 
@@ -94,7 +97,7 @@ fn apply(inout c: Config, name: []u8, v: str) bool {
         c.headers = v
     } else if (name == "OTEL_SDK_DISABLED") {
         if (text.strip(v) == "true") {
-            c.ratio = 0.0
+            c.disabled = true
         }
     } else {
         const n = text.parse_int(text.strip(v)) orelse return false

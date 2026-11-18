@@ -76,7 +76,7 @@ code:
 | `batch` | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | 512 | spans per request |
 | `interval_ms` | `OTEL_BSP_SCHEDULE_DELAY` | 5000 | a batch goes at most this long after the last |
 | `queue` | `OTEL_BSP_MAX_QUEUE_SIZE` | 2048 | spans that may wait for the exporter; more are dropped |
-| `ratio` | `OTEL_TRACES_SAMPLER`, `_ARG` | 1.0 | share of new traces sampled (`always_on`, `always_off`, `traceidratio` and `parentbased_` forms; a child always follows its parent); `OTEL_SDK_DISABLED=true` samples none, whatever the sampler |
+| `ratio` | `OTEL_TRACES_SAMPLER`, `_ARG` | 1.0 | share of new traces sampled (`always_on`, `always_off`, `traceidratio` and `parentbased_` forms; a child always follows its parent); `OTEL_SDK_DISABLED=true` (`disabled`) samples none, whatever the sampler, not even a child of a sampled parent |
 
 A value that does not parse is ignored, as the spec asks. Spans go as
 OTLP/HTTP JSON, which every OTLP/HTTP receiver takes;

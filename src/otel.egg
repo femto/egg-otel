@@ -76,10 +76,11 @@ const Provider = owned struct {
     clock: Clock
     rng: Random
     ratio: f64
+    disabled: bool
 
     // A tracer for one thread; close it before shutdown.
     fn tracer(self: Provider) Tracer {
-        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio }
+        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio, .disabled = self.disabled }
     }
 
     // shutdown, for a defer: what happened goes unread.
@@ -117,7 +118,7 @@ fn provider(threads: Threads, net: Net, files: Fs, a: Allocator, clock: Clock, r
     const tx = rx.sender()
     const stats = threads.channel(Stats, 1)
     const worker = threads.spawn(export_loop, rx, stats.sender(), net, a, clock, rng, trusted, url, headers, cfg)
-    return Provider{ .worker = worker, .tx = tx, .stats = stats, .clock = clock, .rng = rng, .ratio = cfg.ratio }
+    return Provider{ .worker = worker, .tx = tx, .stats = stats, .clock = clock, .rng = rng, .ratio = cfg.ratio, .disabled = cfg.disabled }
 }
 
 const Tracer = owned struct {
@@ -125,10 +126,11 @@ const Tracer = owned struct {
     clock: Clock
     rng: Random
     ratio: f64
+    disabled: bool
 
     // Another tracer on the same exporter, for another thread.
     fn clone(self: Tracer) Tracer {
-        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio }
+        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio, .disabled = self.disabled }
     }
 
     fn close(sink self: Tracer) void {
@@ -138,19 +140,21 @@ const Tracer = owned struct {
 
     // A span started now, a child of parent (none() to start a trace).
     // A new trace is sampled at the configured ratio; a child is as its
-    // parent is. A span that is not sampled still has a context to pass
-    // on, but records nothing and is never sent.
+    // parent is; with the SDK disabled, none is. A span that is not
+    // sampled still has a context to pass on, but records nothing and is
+    // never sent.
     fn start(self: Tracer, a: Allocator, name: []u8, kind: Kind, parent: SpanContext) Span {
         var c = sc.none()
         if (parent.valid) {
             c.trace_id = parent.trace_id
-            c.sampled = parent.sampled
+            // Disabled overrides even a sampled parent's choice.
+            c.sampled = parent.sampled and !self.disabled
         } else {
             self.rng.fill(&c.trace_id[0..])
             if (sc.all_zero(c.trace_id[0..])) {
                 c.trace_id[15] = 1
             }
-            c.sampled = sampled(c.trace_id, self.ratio)
+            c.sampled = !self.disabled and sampled(c.trace_id, self.ratio)
         }
         self.rng.fill(&c.span_id[0..])
         if (sc.all_zero(c.span_id[0..])) {
