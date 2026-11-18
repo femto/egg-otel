@@ -7,6 +7,9 @@ true 0.25
 false false 0.25
 true 1.0
 true 0.0
+disabled over always_on: 0.0
+disabled over traceidratio: 0.0
+not disabled: 0.5
 http://localhost:4318/v1/traces
 true
 https://s1234.eu-nbg-2.betterstackdata.com/v1/traces

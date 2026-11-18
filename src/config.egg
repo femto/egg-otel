@@ -48,19 +48,31 @@ fn config_from_env(env: Args, service: str) Config {
     const names = [13]str{ "OTEL_SERVICE_NAME", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_TIMEOUT", "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "OTEL_BSP_SCHEDULE_DELAY", "OTEL_BSP_MAX_QUEUE_SIZE", "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_SDK_DISABLED" }
     var sampler: str = ""
     var arg: str = ""
+    var disabled: str = ""
     for (names) |name| {
         if (env.env(name)) |v| {
             if (name == "OTEL_TRACES_SAMPLER") {
                 sampler = v
             } else if (name == "OTEL_TRACES_SAMPLER_ARG") {
                 arg = v
+            } else if (name == "OTEL_SDK_DISABLED") {
+                disabled = v
             } else {
                 _ = apply(&c, name, v)
             }
         }
     }
-    _ = sample(&c, sampler, arg)
+    settle(&c, sampler, arg, disabled)
     return c
+}
+
+// The sampler, then OTEL_SDK_DISABLED over it: disabled samples nothing
+// whatever sampler is named.
+fn settle(inout c: Config, sampler: []u8, arg: []u8, disabled: []u8) void {
+    _ = sample(&c, sampler, arg)
+    if (text.strip(disabled) == "true") {
+        c.ratio = 0.0
+    }
 }
 
 // One environment variable's setting into c (not the sampler's, which

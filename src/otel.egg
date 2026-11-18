@@ -25,6 +25,7 @@
 uses alloc, args, fs, net, rand, thread, time
 
 const http = @import("std/http")
+const text = @import("std/text")
 const sc = @import("context.egg")
 const sp = @import("span.egg")
 const otlp = @import("otlp.egg")
@@ -324,11 +325,35 @@ fn send_batch(out: Out, a: Allocator, trusted: x509.CertList, url: []u8, headers
         return
     }
     if (r.status >= 200 and r.status < 300) {
-        stats.sent = stats.sent + n
+        // A 2xx may still say some were not taken (OTLP's partial success).
+        const rejected = rejected_spans(r.body, n)
+        stats.sent = stats.sent + n - rejected
+        if (rejected > 0) {
+            stats.failed_batches = stats.failed_batches + 1
+            stats.failed_spans = stats.failed_spans + rejected
+            stats.last_status = r.status
+        }
     } else {
         stats.failed_batches = stats.failed_batches + 1
         stats.failed_spans = stats.failed_spans + n
         stats.last_status = r.status
     }
     r.deinit(a)
+}
+
+// How many of n spans an OTLP response body says it rejected:
+// {"partialSuccess":{"rejectedSpans":"2",...}} (an int64, so a string in
+// JSON, or a number), at most n; 0 when it says none, or nothing.
+fn rejected_spans(body: []u8, n: i64) i64 {
+    const key = "\"rejectedSpans\""
+    var i = (text.find(body, key) orelse return 0) + @len(key)
+    while (i < @len(body) and (body[i] == ' ' or body[i] == ':' or body[i] == '"' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) {
+        i = i + 1
+    }
+    var count = 0
+    while (i < @len(body) and body[i] >= '0' and body[i] <= '9' and count <= n) {
+        count = count * 10 + @as(i64, body[i] - '0')
+        i = i + 1
+    }
+    return if (count > n) n else count
 }

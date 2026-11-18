@@ -24,7 +24,10 @@ fn collector(sink server: TcpListener, a: Allocator, sink out: Sender(Buf(u8)), 
             return
         }) orelse return
         defer req.deinit(a)
-        http.respond(c, a, req, "200 OK", "", "Content-Type: application/json\r\n", "{}") catch {}
+        // The first batch is taken but for one span (OTLP's partial
+        // success, with a 200).
+        const answer = if (i == 0) "{\"partialSuccess\":{\"rejectedSpans\":\"1\",\"errorMessage\":\"too old\"}}" else "{}"
+        http.respond(c, a, req, "200 OK", "", "Content-Type: application/json\r\n", answer) catch {}
         out.send(a.concat(req.method, " ", req.path, " ", req.content_type, " ", req.body))
         i = i + 1
     }
@@ -85,7 +88,7 @@ fn main(io: Io, net: Net, files: Fs, a: Allocator, threads: Threads, clock: Cloc
 
     tracer.close()
     const stats = tp.shutdown()
-    io.print("stats: sent ", stats.sent, ", failed ", stats.failed_batches, " batches")
+    io.print("stats: sent ", stats.sent, ", failed ", stats.failed_spans, " spans in ", stats.failed_batches, " batch, last status ", stats.last_status)
     got.join()
 
     var all: Buf(u8) = .empty

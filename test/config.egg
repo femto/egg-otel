@@ -46,6 +46,14 @@ fn main(io: Io, a: Allocator) void {
     io.print(cfgm.sample(&c, "traceidratio", "1.5"), " ", cfgm.sample(&c, "jaeger_remote", ""), " ", c.ratio)
     io.print(cfgm.sample(&c, "always_on", ""), " ", c.ratio)
     io.print(cfgm.apply(&c, "OTEL_SDK_DISABLED", "true"), " ", c.ratio)
+    // As config_from_env settles them: disabled wins over any sampler.
+    var d = otel.config("d")
+    cfgm.settle(&d, "always_on", "", "true")
+    io.print("disabled over always_on: ", d.ratio)
+    cfgm.settle(&d, "traceidratio", "0.5", " true ")
+    io.print("disabled over traceidratio: ", d.ratio)
+    cfgm.settle(&d, "traceidratio", "0.5", "false")
+    io.print("not disabled: ", d.ratio)
     // Where spans go.
     url(io, a, c)
     io.print(cfgm.apply(&c, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://s1234.eu-nbg-2.betterstackdata.com/"))
