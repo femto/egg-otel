@@ -1,0 +1,21 @@
+true false checkout
+true true true true
+2500 200 64 16
+false false false false 64 16 200
+true 0.0
+true 0.25
+false false 0.25
+true 1.0
+true 0.0
+http://localhost:4318/v1/traces
+true
+https://s1234.eu-nbg-2.betterstackdata.com/v1/traces
+https://in.example.com/custom/traces
+[Authorization=Bearer abc123] -> [Authorization: Bearer abc123\r\n]
+[Authorization=Bearer%20abc123, x-team = core ,,] -> [Authorization: Bearer abc123\r\nx-team: core\r\n]
+[] -> []
+[k=v%2Cw%3D] -> [k: v,w=\r\n]
+[novalue] -> BadHeaders
+[=v] -> BadHeaders
+[k=a%0D%0AX-Evil: 1] -> BadHeaders
+[k=50%] -> [k: 50%\r\n]

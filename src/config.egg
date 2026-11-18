@@ -1,0 +1,218 @@
+// otel/config: where spans go and how, set in code or by the environment
+// variables every OpenTelemetry SDK reads (OTEL_SERVICE_NAME,
+// OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, ...), so the
+// same settings send an Egg program's spans where a Go or Python one's go.
+uses alloc, args
+
+const text = @import("std/text")
+
+// service names this program (service.name). endpoint is the OTLP/HTTP
+// base, http:// or https://: spans go to endpoint/v1/traces, or to
+// traces_endpoint as it is when that is set. headers go with every
+// request, as OTEL_EXPORTER_OTLP_HEADERS writes them: "key=value" pairs
+// split by commas, percent-encoded ("Authorization=Bearer%20abc", or with
+// the space as it is). batch spans go in one request, at most interval_ms
+// apart while there are any; queue is how many may wait for the exporter
+// before more are dropped; timeout_ms bounds each request; ratio is the
+// share of new traces sampled (a span with a parent follows the parent's
+// choice).
+const Config = struct {
+    service: str
+    endpoint: str
+    traces_endpoint: str
+    headers: str
+    batch: i64
+    queue: i64
+    interval_ms: i64
+    timeout_ms: i64
+    ratio: f64
+}
+
+// The defaults of OTel's batch span processor and OTLP exporter.
+fn config(service: str) Config {
+    return Config{ .service = service, .endpoint = "http://localhost:4318", .traces_endpoint = "", .headers = "", .batch = 512, .queue = 2048, .interval_ms = 5000, .timeout_ms = 10000, .ratio = 1.0 }
+}
+
+// config(service), then whatever the OpenTelemetry environment variables
+// set: OTEL_SERVICE_NAME; OTEL_EXPORTER_OTLP_ENDPOINT,
+// OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_TIMEOUT and their
+// TRACES_ forms, which win; OTEL_BSP_SCHEDULE_DELAY, OTEL_BSP_MAX_QUEUE_SIZE,
+// OTEL_BSP_MAX_EXPORT_BATCH_SIZE; OTEL_TRACES_SAMPLER (always_on,
+// always_off, traceidratio and their parentbased_ forms: a child always
+// follows its parent here) with OTEL_TRACES_SAMPLER_ARG; and
+// OTEL_SDK_DISABLED=true, which samples nothing. A value that does not
+// parse is ignored, as the spec asks. OTEL_EXPORTER_OTLP_PROTOCOL is not
+// read: spans go as http/json, which every OTLP/HTTP receiver takes.
+fn config_from_env(env: Args, service: str) Config {
+    var c = config(service)
+    const names = [13]str{ "OTEL_SERVICE_NAME", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_TIMEOUT", "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "OTEL_BSP_SCHEDULE_DELAY", "OTEL_BSP_MAX_QUEUE_SIZE", "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_SDK_DISABLED" }
+    var sampler: str = ""
+    var arg: str = ""
+    for (names) |name| {
+        if (env.env(name)) |v| {
+            if (name == "OTEL_TRACES_SAMPLER") {
+                sampler = v
+            } else if (name == "OTEL_TRACES_SAMPLER_ARG") {
+                arg = v
+            } else {
+                _ = apply(&c, name, v)
+            }
+        }
+    }
+    _ = sample(&c, sampler, arg)
+    return c
+}
+
+// One environment variable's setting into c (not the sampler's, which
+// sample takes): false if it is not one, or its value does not parse.
+fn apply(inout c: Config, name: []u8, v: str) bool {
+    if (name == "OTEL_SERVICE_NAME") {
+        if (@len(v) == 0) {
+            return false
+        }
+        c.service = v
+    } else if (name == "OTEL_EXPORTER_OTLP_ENDPOINT") {
+        c.endpoint = v
+    } else if (name == "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") {
+        c.traces_endpoint = v
+    } else if (name == "OTEL_EXPORTER_OTLP_HEADERS") {
+        // The TRACES_ form, read after, replaces these.
+        c.headers = v
+    } else if (name == "OTEL_EXPORTER_OTLP_TRACES_HEADERS") {
+        c.headers = v
+    } else if (name == "OTEL_SDK_DISABLED") {
+        if (text.strip(v) == "true") {
+            c.ratio = 0.0
+        }
+    } else {
+        const n = text.parse_int(text.strip(v)) orelse return false
+        if (n < 0 or (n == 0 and name != "OTEL_EXPORTER_OTLP_TIMEOUT" and name != "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT")) {
+            return false
+        }
+        if (name == "OTEL_EXPORTER_OTLP_TIMEOUT" or name == "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT") {
+            c.timeout_ms = n
+        } else if (name == "OTEL_BSP_SCHEDULE_DELAY") {
+            c.interval_ms = n
+        } else if (name == "OTEL_BSP_MAX_QUEUE_SIZE") {
+            c.queue = n
+        } else if (name == "OTEL_BSP_MAX_EXPORT_BATCH_SIZE") {
+            c.batch = n
+        } else {
+            return false
+        }
+    }
+    return true
+}
+
+// OTEL_TRACES_SAMPLER and its argument into c.ratio: false for a sampler
+// this SDK does not have, or a ratio outside 0 to 1, which leave it.
+fn sample(inout c: Config, sampler: []u8, arg: []u8) bool {
+    const s = text.strip(sampler)
+    if (@len(s) == 0) {
+        return true
+    }
+    if (s == "always_on" or s == "parentbased_always_on") {
+        c.ratio = 1.0
+        return true
+    }
+    if (s == "always_off" or s == "parentbased_always_off") {
+        c.ratio = 0.0
+        return true
+    }
+    if (s == "traceidratio" or s == "parentbased_traceidratio") {
+        if (@len(text.strip(arg)) == 0) {
+            c.ratio = 1.0
+            return true
+        }
+        const r = text.parse_float(text.strip(arg)) orelse return false
+        if (r < 0.0 or r > 1.0) {
+            return false
+        }
+        c.ratio = r
+        return true
+    }
+    return false
+}
+
+// Where spans go: traces_endpoint as it is, or endpoint/v1/traces (one
+// slash between, whatever endpoint ends with).
+fn traces_url(a: Allocator, c: Config) Buf(u8) {
+    if (@len(c.traces_endpoint) > 0) {
+        return a.concat(c.traces_endpoint, "")
+    }
+    // Without the spaces around it, and any slash at its end.
+    var lo = 0
+    var hi = @len(c.endpoint)
+    while (lo < hi and (c.endpoint[lo] == ' ' or c.endpoint[lo] == '\t')) {
+        lo = lo + 1
+    }
+    while (hi > lo and (c.endpoint[hi - 1] == ' ' or c.endpoint[hi - 1] == '\t' or c.endpoint[hi - 1] == '/')) {
+        hi = hi - 1
+    }
+    return a.concat(c.endpoint[lo..hi], "/v1/traces")
+}
+
+fn hex_digit(c: u8) i64 {
+    if (c >= '0' and c <= '9') {
+        return @as(i64, c - '0')
+    }
+    if (c >= 'a' and c <= 'f') {
+        return @as(i64, c - 'a') + 10
+    }
+    if (c >= 'A' and c <= 'F') {
+        return @as(i64, c - 'A') + 10
+    }
+    return -1
+}
+
+// s, its %XX escapes decoded, at the end of out (a % without two hex
+// digits stays as it is). false if the result holds a CR, LF or NUL,
+// which would end the header early, or let a value write headers of its
+// own.
+fn unescape(a: Allocator, inout out: Buf(u8), s: []u8) bool {
+    var i = 0
+    while (i < @len(s)) {
+        var c = s[i]
+        if (c == '%' and i + 2 < @len(s) and hex_digit(s[i + 1]) >= 0 and hex_digit(s[i + 2]) >= 0) {
+            c = @as(u8, hex_digit(s[i + 1]) * 16 + hex_digit(s[i + 2]))
+            i = i + 2
+        }
+        if (c == '\r' or c == '\n' or c == 0) {
+            return false
+        }
+        a.push(&out, c)
+        i = i + 1
+    }
+    return true
+}
+
+// The headers of an OTEL_EXPORTER_OTLP_HEADERS value as std/http takes
+// them ("Authorization: Bearer abc\r\n" each); error.BadHeaders for a
+// pair without a key or "=", or one that decodes to a line break.
+// Spaces around keys and values go; empty pairs ("a=1,,b=2") are skipped.
+fn parse_headers(a: Allocator, s: []u8) !Buf(u8) {
+    var out: Buf(u8) = .empty
+    errdefer a.free(out)
+    var start = 0
+    while (start <= @len(s)) {
+        const end = text.find_from(s, ",", start) orelse @len(s)
+        const pair = text.strip(s[start..end])
+        if (@len(pair) > 0) {
+            const eq = text.find(pair, "=") orelse return error.BadHeaders
+            const key = text.strip(pair[0..eq])
+            if (@len(key) == 0) {
+                return error.BadHeaders
+            }
+            if (!unescape(a, &out, key)) {
+                return error.BadHeaders
+            }
+            a.append_str(&out, ": ")
+            if (!unescape(a, &out, text.strip(pair[eq + 1..]))) {
+                return error.BadHeaders
+            }
+            a.append_str(&out, "\r\n")
+        }
+        start = end + 1
+    }
+    return out
+}

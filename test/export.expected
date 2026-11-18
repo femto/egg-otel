@@ -1,4 +1,5 @@
 quiet recording: false
+stats: sent 3, failed 0 batches
 true
 true
 requests: 2

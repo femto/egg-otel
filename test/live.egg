@@ -1,8 +1,15 @@
-// Against a real OpenTelemetry Collector (test/live.sh starts one): a
-// client span calls an HTTP server in this program, which continues the
-// trace from the traceparent it is sent. Without OTEL_LIVE_ENDPOINT it
-// does nothing, so clutch test passes without a collector.
-uses alloc, args, io, net, rand, thread, time
+// A client span calls an HTTP server in this program, which continues the
+// trace from the traceparent it is sent, and the spans go to a real
+// receiver: OTEL_LIVE_ENDPOINT names test/live.sh's collector; otherwise
+// the standard OTEL_EXPORTER_OTLP_* variables say where, as for any
+// OpenTelemetry SDK, such as Better Stack:
+//
+//   OTEL_EXPORTER_OTLP_ENDPOINT=https://$INGESTING_HOST \
+//   OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $SOURCE_TOKEN" \
+//   ./build/test/live
+//
+// With neither it does nothing, so clutch test passes without a receiver.
+uses alloc, args, fs, io, net, rand, thread, time
 
 const http = @import("std/http")
 const otel = @import("otel")
@@ -62,12 +69,18 @@ fn get(net: Net, a: Allocator, url: []u8, headers: []u8) i64 {
     return status
 }
 
-fn main(io: Io, env: Args, net: Net, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
-    const endpoint = env.env("OTEL_LIVE_ENDPOINT") orelse return
-    var cfg = otel.config("egg-otel-live")
-    cfg.endpoint = endpoint
+fn main(io: Io, env: Args, net: Net, files: Fs, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
+    var cfg = otel.config_from_env(env, "egg-otel-live")
+    if (env.env("OTEL_LIVE_ENDPOINT")) |endpoint| {
+        cfg.endpoint = endpoint
+    } else if (env.env("OTEL_EXPORTER_OTLP_ENDPOINT") == null and env.env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == null) {
+        return
+    }
     const server = try net.tcp_listen("127.0.0.1", 0)
-    const tp = otel.provider(threads, net, a, clock, rng, cfg)
+    const tp = otel.provider(threads, net, files, a, clock, rng, cfg) catch |e| {
+        server.close()
+        return e
+    }
     const tracer = tp.tracer()
     const digits = a.int_str(server.port())
     defer a.free(digits)
@@ -78,6 +91,6 @@ fn main(io: Io, env: Args, net: Net, a: Allocator, threads: Threads, clock: Cloc
     traced_call(a, tracer, net, url)
     worker.join()
     tracer.close()
-    tp.shutdown()
-    io.print("sent")
+    const stats = tp.shutdown()
+    io.print("sent ", stats.sent, ", failed ", stats.failed_spans, " (last status ", stats.last_status, ")")
 }

@@ -1,0 +1,64 @@
+// The OTEL_* settings as config_from_env applies them (through apply and
+// sample, since a test cannot set the environment), header parsing, and
+// where spans go.
+uses alloc, io
+
+const otel = @import("otel")
+const cfgm = @import("otel/config")
+
+fn headers(io: Io, a: Allocator, s: []u8) void {
+    const h = cfgm.parse_headers(a, s) catch |e| {
+        io.print("[", s, "] -> ", @errorName(e))
+        return
+    }
+    // CR and LF shown, so the expected output is one line each.
+    var shown: Buf(u8) = .empty
+    defer a.free(shown)
+    for (h) |c| {
+        if (c == '\r') {
+            a.append_str(&shown, "\\r")
+        } else if (c == '\n') {
+            a.append_str(&shown, "\\n")
+        } else {
+            a.push(&shown, c)
+        }
+    }
+    io.print("[", s, "] -> [", shown, "]")
+    a.free(h)
+}
+
+fn url(io: Io, a: Allocator, c: otel.Config) void {
+    const u = cfgm.traces_url(a, c)
+    io.print(u)
+    a.free(u)
+}
+
+fn main(io: Io, a: Allocator) void {
+    var c = otel.config("default")
+    io.print(cfgm.apply(&c, "OTEL_SERVICE_NAME", "checkout"), " ", cfgm.apply(&c, "OTEL_SERVICE_NAME", ""), " ", c.service)
+    io.print(cfgm.apply(&c, "OTEL_EXPORTER_OTLP_TIMEOUT", "2500"), " ", cfgm.apply(&c, "OTEL_BSP_SCHEDULE_DELAY", " 200 "), " ", cfgm.apply(&c, "OTEL_BSP_MAX_QUEUE_SIZE", "64"), " ", cfgm.apply(&c, "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "16"))
+    io.print(c.timeout_ms, " ", c.interval_ms, " ", c.queue, " ", c.batch)
+    // Values that do not parse leave what was there.
+    io.print(cfgm.apply(&c, "OTEL_BSP_MAX_QUEUE_SIZE", "lots"), " ", cfgm.apply(&c, "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "0"), " ", cfgm.apply(&c, "OTEL_BSP_SCHEDULE_DELAY", "-5"), " ", cfgm.apply(&c, "OTEL_NOT_A_THING", "1"), " ", c.queue, " ", c.batch, " ", c.interval_ms)
+    // Samplers.
+    io.print(cfgm.sample(&c, "always_off", ""), " ", c.ratio)
+    io.print(cfgm.sample(&c, "parentbased_traceidratio", "0.25"), " ", c.ratio)
+    io.print(cfgm.sample(&c, "traceidratio", "1.5"), " ", cfgm.sample(&c, "jaeger_remote", ""), " ", c.ratio)
+    io.print(cfgm.sample(&c, "always_on", ""), " ", c.ratio)
+    io.print(cfgm.apply(&c, "OTEL_SDK_DISABLED", "true"), " ", c.ratio)
+    // Where spans go.
+    url(io, a, c)
+    io.print(cfgm.apply(&c, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://s1234.eu-nbg-2.betterstackdata.com/"))
+    url(io, a, c)
+    _ = cfgm.apply(&c, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://in.example.com/custom/traces")
+    url(io, a, c)
+    // Headers, as OTEL_EXPORTER_OTLP_HEADERS writes them.
+    headers(io, a, "Authorization=Bearer abc123")
+    headers(io, a, "Authorization=Bearer%20abc123, x-team = core ,,")
+    headers(io, a, "")
+    headers(io, a, "k=v%2Cw%3D")
+    headers(io, a, "novalue")
+    headers(io, a, "=v")
+    headers(io, a, "k=a%0D%0AX-Evil: 1")
+    headers(io, a, "k=50%")
+}

@@ -6,7 +6,7 @@ uses alloc
 const sc = @import("context.egg")
 const sp = @import("span.egg")
 
-const VERSION = "0.1.0"
+const VERSION = "0.2.0"
 
 // s as a JSON string, quotes and all, at the end of out. Bytes past
 // ASCII go through as they are: text is UTF-8.

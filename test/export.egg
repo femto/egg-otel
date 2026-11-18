@@ -2,7 +2,7 @@
 // POSTed to a collector, here a thread of this test that keeps what it
 // gets. Batches of 2: three spans make one full batch, and the third goes
 // at shutdown. A trace sampled out sends nothing.
-uses alloc, io, net, rand, thread, time
+uses alloc, fs, io, net, rand, thread, time
 
 const http = @import("std/http")
 const text = @import("std/text")
@@ -40,11 +40,9 @@ fn count(s: []u8, needle: []u8) i64 {
     return n
 }
 
-fn main(io: Io, net: Net, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
+fn main(io: Io, net: Net, files: Fs, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
     const server = try net.tcp_listen("127.0.0.1", 0)
     const port = server.port()
-    const bodies = threads.channel(Buf(u8), 4)
-    const got = threads.spawn(collector, server, a, bodies.sender(), 2)
     const digits = a.int_str(port)
     const url = a.concat("http://127.0.0.1:", digits)
     a.free(digits)
@@ -54,7 +52,12 @@ fn main(io: Io, net: Net, a: Allocator, threads: Threads, clock: Clock, rng: Ran
     cfg.endpoint = endpoint
     cfg.batch = 2
     cfg.interval_ms = 60000
-    const tp = otel.provider(threads, net, a, clock, rng, cfg)
+    const tp = otel.provider(threads, net, files, a, clock, rng, cfg) catch |e| {
+        server.close()
+        return e
+    }
+    const bodies = threads.channel(Buf(u8), 4)
+    const got = threads.spawn(collector, server, a, bodies.sender(), 2)
     const tracer = tp.tracer()
 
     var root = tracer.start(a, "root", .server, otel.none())
@@ -81,7 +84,8 @@ fn main(io: Io, net: Net, a: Allocator, threads: Threads, clock: Clock, rng: Ran
     tracer.finish(a, quiet)
 
     tracer.close()
-    tp.shutdown()
+    const stats = tp.shutdown()
+    io.print("stats: sent ", stats.sent, ", failed ", stats.failed_batches, " batches")
     got.join()
 
     var all: Buf(u8) = .empty
