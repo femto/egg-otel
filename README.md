@@ -87,6 +87,12 @@ headers that do not parse) leaves the setting it would have replaced.
 neither the headers nor the roots are looked at, so a stale setting does
 not stop the program.
 
+**Credentials need `https://`.** Headers go with every request as they
+are, so a token in `OTEL_EXPORTER_OTLP_HEADERS` sent to an `http://`
+endpoint crosses the network in the clear. Use `http://` only for a
+collector on the same machine (or a trusted network) that is sent no
+credentials, and `https://` for any backend that needs a token.
+
 Spans go as OTLP/HTTP **JSON** only (`OTEL_EXPORTER_OTLP_PROTOCOL` is not
 read), so the backend must take JSON: the OTLP spec says a receiver
 SHOULD take both JSON and binary protobuf, not that it must. The
