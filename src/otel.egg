@@ -25,7 +25,6 @@
 uses alloc, args, fs, net, rand, thread, time
 
 const http = @import("std/http")
-const text = @import("std/text")
 const sc = @import("context.egg")
 const sp = @import("span.egg")
 const otlp = @import("otlp.egg")
@@ -103,15 +102,22 @@ const Provider = owned struct {
 // The exporter for cfg, started. Fails with error.BadHeaders for headers
 // that do not parse, and, for an https:// endpoint, as tls/roots does
 // when the system's roots cannot be read (error.NoRoots).
+//
+// With the SDK disabled nothing is sampled, so nothing is sent: neither
+// the headers nor the roots are looked at, and a bad setting left in the
+// environment does not stop the program.
 fn provider(threads: Threads, net: Net, files: Fs, a: Allocator, clock: Clock, rng: Random, cfg: Config) !Provider {
-    var headers = try cfgm.parse_headers(a, cfg.headers)
+    var headers: Buf(u8) = .empty
     errdefer a.free(headers)
+    if (!cfg.disabled) {
+        a.free(@replace(&headers, try cfgm.parse_headers(a, cfg.headers)))
+    }
     a.append_str(&headers, "Content-Type: application/json\r\n")
     const url = cfgm.traces_url(a, cfg)
     errdefer a.free(url)
     var trusted = x509.CertList.empty()
     errdefer a.free(trusted)
-    if (https.is_https(url)) {
+    if (!cfg.disabled and https.is_https(url)) {
         a.free(@replace(&trusted, try roots.system(a, files)))
     }
     const rx = threads.channel(Span, cfg.queue)
@@ -330,7 +336,7 @@ fn send_batch(out: Out, a: Allocator, trusted: x509.CertList, url: []u8, headers
     }
     if (r.status >= 200 and r.status < 300) {
         // A 2xx may still say some were not taken (OTLP's partial success).
-        const rejected = rejected_spans(r.body, n)
+        const rejected = otlp.rejected_spans(r.body, n)
         stats.sent = stats.sent + n - rejected
         if (rejected > 0) {
             stats.failed_batches = stats.failed_batches + 1
@@ -343,21 +349,4 @@ fn send_batch(out: Out, a: Allocator, trusted: x509.CertList, url: []u8, headers
         stats.last_status = r.status
     }
     r.deinit(a)
-}
-
-// How many of n spans an OTLP response body says it rejected:
-// {"partialSuccess":{"rejectedSpans":"2",...}} (an int64, so a string in
-// JSON, or a number), at most n; 0 when it says none, or nothing.
-fn rejected_spans(body: []u8, n: i64) i64 {
-    const key = "\"rejectedSpans\""
-    var i = (text.find(body, key) orelse return 0) + @len(key)
-    while (i < @len(body) and (body[i] == ' ' or body[i] == ':' or body[i] == '"' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r')) {
-        i = i + 1
-    }
-    var count = 0
-    while (i < @len(body) and body[i] >= '0' and body[i] <= '9' and count <= n) {
-        count = count * 10 + @as(i64, body[i] - '0')
-        i = i + 1
-    }
-    return if (count > n) n else count
 }

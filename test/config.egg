@@ -60,6 +60,24 @@ fn main(io: Io, a: Allocator) void {
     url(io, a, c)
     _ = cfgm.apply(&c, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://in.example.com/custom/traces")
     url(io, a, c)
+    // OTEL_SDK_DISABLED in any case.
+    var f = otel.config("f")
+    io.print(cfgm.apply(&f, "OTEL_SDK_DISABLED", "TRUE"), " ", f.disabled)
+    var g = otel.config("g")
+    cfgm.settle(&g, "", "", " True")
+    io.print("True: ", g.disabled)
+    // A setting that is not good leaves a good one before it.
+    var h = otel.config("h")
+    io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://ok.example"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "not-a-url"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://"), " [", h.endpoint, "] [", h.traces_endpoint, "]")
+    io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer abc"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "novalue"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x team=core"), " [", h.headers, "]")
+    // /v1/traces at the end of the path, before a query or fragment.
+    var q = otel.config("q")
+    q.endpoint = "https://collector.example/ingest/?tenant=a#top"
+    url(io, a, q)
+    q.endpoint = "http://collector.example:4318"
+    url(io, a, q)
+    q.endpoint = " http://collector.example// "
+    url(io, a, q)
     // Headers, as OTEL_EXPORTER_OTLP_HEADERS writes them.
     headers(io, a, "Authorization=Bearer abc123")
     headers(io, a, "Authorization=Bearer%20abc123, x-team = core ,,")
@@ -69,4 +87,9 @@ fn main(io: Io, a: Allocator) void {
     headers(io, a, "=v")
     headers(io, a, "k=a%0D%0AX-Evil: 1")
     headers(io, a, "k=50%")
+    // A name is an HTTP token; a Content-Type of any case is left out.
+    headers(io, a, "x team=core")
+    headers(io, a, "x%20team=core")
+    headers(io, a, "Content-Type=application/x-protobuf, Authorization=Bearer x")
+    headers(io, a, "content%2Dtype=text/plain,x-team=core")
 }

@@ -1,0 +1,11 @@
+0  {}
+0  
+1  {"partialSuccess":{"rejectedSpans":"1","errorMessage":"too old"}}
+1  {"partialSuccess":{"rejectedSpans":1}}
+1   { "partialSuccess" : { "errorMessage" : "a \"rejectedSpans\": 2" , "rejectedSpans" : "1" } } 
+1  {"extension":{"rejectedSpans":0},"partialSuccess":{"rejectedSpans":"1"}}
+0  {"partialSuccess":{"nested":{"rejectedSpans":2}}}
+0  {"list":[{"partialSuccess":{"rejectedSpans":2}}],"partialSuccess":{}}
+2  {"partialSuccess":{"rejectedSpans":"7"}}
+0  {"partialSuccess":"rejectedSpans"}
+1  {"partialSuccess":{"rejectedSpans":"1"

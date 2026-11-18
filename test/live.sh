@@ -5,6 +5,12 @@
 # server's from the traceparent it was sent.
 #   CLUTCH=path/to/clutch sh test/live.sh
 set -eu
+# Only what this script sets: OTEL_* settings in the environment (another
+# backend, its token, OTEL_SDK_DISABLED, a service name) must neither
+# send these spans elsewhere nor change what the collector gets.
+for v in $(env | sed -n 's/^\(OTEL_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$v"
+done
 # The collector is local: past any proxy the environment names.
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 here=$(cd "$(dirname "$0")/.." && pwd)

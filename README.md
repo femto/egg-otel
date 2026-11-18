@@ -55,8 +55,10 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $SOURCE_TOKEN"
 does the same and returns what happened: spans the backend took
 (`sent`), and batches and spans it did not (`failed_batches`,
 `failed_spans`), with the last failure's HTTP status (`last_status`: 401
-for a wrong token, 0 when no connection was made), since a span that cannot
-be sent is let go rather than kept. A batch answered with a 2xx counts as
+for a wrong token; 0 when the HTTP client returned no usable response:
+no connection, a failed TLS handshake, a timeout, or a response it could
+not read, such as one over its size limit, whatever status it had), since
+a span that cannot be sent is let go rather than kept. A batch answered with a 2xx counts as
 taken but for the spans its OTLP partial success rejects
 (`partialSuccess.rejectedSpans`), which count as failed.
 
@@ -72,16 +74,32 @@ code:
 | `endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP/HTTP base; spans go to `/v1/traces` under it |
 | `traces_endpoint` | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | | the full URL for spans, if set |
 | `headers` | `OTEL_EXPORTER_OTLP_HEADERS` (`_TRACES_` wins) | | `key=value,...`, percent-encoded |
-| `timeout_ms` | `OTEL_EXPORTER_OTLP_TIMEOUT` (`_TRACES_` wins) | 10000 | per request |
+| `timeout_ms` | `OTEL_EXPORTER_OTLP_TIMEOUT` (`_TRACES_` wins) | 10000 | per read or write of a request (see below) |
 | `batch` | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | 512 | spans per request |
 | `interval_ms` | `OTEL_BSP_SCHEDULE_DELAY` | 5000 | a batch goes at most this long after the last |
 | `queue` | `OTEL_BSP_MAX_QUEUE_SIZE` | 2048 | spans that may wait for the exporter; more are dropped |
 | `ratio` | `OTEL_TRACES_SAMPLER`, `_ARG` | 1.0 | share of new traces sampled (`always_on`, `always_off`, `traceidratio` and `parentbased_` forms; a child always follows its parent); `OTEL_SDK_DISABLED=true` (`disabled`) samples none, whatever the sampler, not even a child of a sampled parent |
 
-A value that does not parse is ignored, as the spec asks. Spans go as
-OTLP/HTTP JSON, which every OTLP/HTTP receiver takes;
-`OTEL_EXPORTER_OTLP_PROTOCOL` is not read. For `https://`, the server's
-certificate is checked against the system's roots (egg-tls).
+A value that does not parse is ignored, as the spec asks, and one from
+the environment that is not good (an endpoint that is no http(s) URL,
+headers that do not parse) leaves the setting it would have replaced.
+`OTEL_SDK_DISABLED` is read in any case (`TRUE` too); with it set,
+neither the headers nor the roots are looked at, so a stale setting does
+not stop the program.
+
+Spans go as OTLP/HTTP **JSON** only (`OTEL_EXPORTER_OTLP_PROTOCOL` is not
+read), so the backend must take JSON: the OTLP spec says a receiver
+SHOULD take both JSON and binary protobuf, not that it must. The
+OpenTelemetry Collector and Better Stack do. The body's `Content-Type` is
+`application/json` whatever the headers say: a `Content-Type` among them
+is left out. Header names must be HTTP tokens. For `https://`, the
+server's certificate is checked against the system's roots (egg-tls).
+
+`timeout_ms` bounds each step of a request (each read and write on the
+connection), not the request as a whole: a collector that answers slowly,
+a little at a time, can hold the exporter thread longer. That is std/http's
+and egg-tls's timeout today; one deadline for the whole request belongs
+there.
 
 `finish` never waits: with the queue full (or the exporter gone) the span
 is dropped, not the request held up. A batch that the collector does not

@@ -72,7 +72,11 @@ fn get(net: Net, a: Allocator, url: []u8, headers: []u8) i64 {
 fn main(io: Io, env: Args, net: Net, files: Fs, a: Allocator, threads: Threads, clock: Clock, rng: Random) !void {
     var cfg = otel.config_from_env(env, "egg-otel-live")
     if (env.env("OTEL_LIVE_ENDPOINT")) |endpoint| {
+        // The local collector only: nothing the environment names for
+        // another backend goes there, not its URL and not its credentials.
         cfg.endpoint = endpoint
+        cfg.traces_endpoint = ""
+        cfg.headers = ""
     } else if (env.env("OTEL_EXPORTER_OTLP_ENDPOINT") == null and env.env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == null) {
         return
     }

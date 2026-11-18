@@ -1,0 +1,26 @@
+// OTLP's partial success: partialSuccess.rejectedSpans, found by walking
+// the JSON, not by searching it, and never more than the batch.
+uses io
+
+const otlp = @import("otel/otlp")
+
+fn show(io: Io, body: []u8) void {
+    io.print(otlp.rejected_spans(body, 2), "  ", body)
+}
+
+fn main(io: Io) void {
+    show(io, "{}")
+    show(io, "")
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":\"1\",\"errorMessage\":\"too old\"}}")
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":1}}")
+    show(io, " { \"partialSuccess\" : { \"errorMessage\" : \"a \\\"rejectedSpans\\\": 2\" , \"rejectedSpans\" : \"1\" } } ")
+    // Another field of the same name elsewhere is not it.
+    show(io, "{\"extension\":{\"rejectedSpans\":0},\"partialSuccess\":{\"rejectedSpans\":\"1\"}}")
+    show(io, "{\"partialSuccess\":{\"nested\":{\"rejectedSpans\":2}}}")
+    show(io, "{\"list\":[{\"partialSuccess\":{\"rejectedSpans\":2}}],\"partialSuccess\":{}}")
+    // More than the batch is the batch; a partialSuccess that is no
+    // object, none.
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":\"7\"}}")
+    show(io, "{\"partialSuccess\":\"rejectedSpans\"}")
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":\"1\"")
+}

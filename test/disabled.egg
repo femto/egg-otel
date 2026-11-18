@@ -25,4 +25,13 @@ fn main(io: Io, net: Net, files: Fs, a: Allocator, threads: Threads, clock: Cloc
     tracer.close()
     const stats = tp.shutdown()
     io.print("sent ", stats.sent, ", failed ", stats.failed_spans)
+    // Disabled, the exporter's settings are not looked at: headers that
+    // do not parse and an https:// endpoint do not stop the program.
+    var bad = otel.config("bad")
+    bad.disabled = true
+    bad.headers = "novalue"
+    bad.endpoint = "https://127.0.0.1:9"
+    const quiet = try otel.provider(threads, net, files, a, clock, rng, bad)
+    io.print("disabled with bad settings: started")
+    quiet.close()
 }
