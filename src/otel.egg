@@ -1,9 +1,12 @@
-// otel: OpenTelemetry traces for Egg. Spans go to a collector over
-// OTLP/HTTP (JSON), batched by a thread of their own; W3C traceparent
-// carries a trace from process to process.
+// otel: OpenTelemetry traces for Egg. Spans go to a collector, or
+// straight to a backend that takes OTLP (Better Stack, Honeycomb, Grafana
+// Cloud...), over OTLP/HTTP (JSON), http:// or https://, batched by a
+// thread of their own; W3C traceparent carries a trace from process to
+// process. Configured as every OpenTelemetry SDK is, by OTEL_* variables:
 //
-//     var tp = otel.provider(threads, net, a, clock, rng, otel.config("my-service"))
-//     defer tp.shutdown()                 // after every tracer has closed
+//     const tp = try otel.provider(threads, net, files, a, clock, rng, otel.config_from_env(env, "my-service"))
+//     defer tp.close()                    // after every tracer has closed;
+//                                         // tp.shutdown() also says how it went
 //     const tracer = tp.tracer()          // one per thread: tracer.clone()
 //     defer tracer.close()
 //
@@ -17,13 +20,18 @@
 //
 // Code that starts and finishes spans reads the clock and random bytes
 // and sends on a channel, so its module declares `uses time, rand,
-// thread`; making the provider needs net and alloc as well.
-uses alloc, net, rand, thread, time
+// thread`; making the provider needs net, fs (the system's roots, for
+// https://) and alloc as well.
+uses alloc, args, fs, net, rand, thread, time
 
 const http = @import("std/http")
 const sc = @import("context.egg")
 const sp = @import("span.egg")
 const otlp = @import("otlp.egg")
+const cfgm = @import("config.egg")
+const https = @import("tls/https")
+const roots = @import("tls/roots")
+const x509 = @import("tls/x509")
 
 const SpanContext = sc.SpanContext
 const Span = sp.Span
@@ -31,26 +39,14 @@ const Kind = sp.Kind
 
 const VERSION = otlp.VERSION
 
-// Where and how spans go. service names this program in the collector
-// (service.name); endpoint is the collector's OTLP/HTTP base (spans go to
-// endpoint/v1/traces, http:// only for now); batch spans go in one
-// request, at most interval_ms apart while there are any; queue is how
-// many may wait for the exporter before more are dropped; ratio, the
-// share of new traces sampled (a span with a parent follows the
-// parent's choice).
-const Config = struct {
-    service: str
-    endpoint: str
-    batch: i64
-    queue: i64
-    interval_ms: i64
-    timeout_ms: i64
-    ratio: f64
+const Config = cfgm.Config
+
+fn config(service: str) Config {
+    return cfgm.config(service)
 }
 
-// The defaults of OTel's batch span processor and OTLP exporter.
-fn config(service: str) Config {
-    return Config{ .service = service, .endpoint = "http://localhost:4318", .batch = 512, .queue = 2048, .interval_ms = 5000, .timeout_ms = 10000, .ratio = 1.0 }
+fn config_from_env(env: Args, service: str) Config {
+    return cfgm.config_from_env(env, service)
 }
 
 fn none() SpanContext {
@@ -61,33 +57,74 @@ fn parse_traceparent(s: []u8) ?SpanContext {
     return sc.parse_traceparent(s)
 }
 
+// What the exporter did, for shutdown to tell: spans the collector took,
+// batches it did not (or that did not reach it), and the last of those:
+// its HTTP status, or 0 when there was none (no connection, no TLS).
+const Stats = struct {
+    sent: i64
+    failed_batches: i64
+    failed_spans: i64
+    last_status: i64
+}
+
 // The exporter thread and the sending end tracers clone.
 const Provider = owned struct {
     worker: Thread
     tx: Sender(Span)
+    stats: Receiver(Stats)
     clock: Clock
     rng: Random
     ratio: f64
+    disabled: bool
 
     // A tracer for one thread; close it before shutdown.
     fn tracer(self: Provider) Tracer {
-        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio }
+        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio, .disabled = self.disabled }
     }
 
-    // Sends what is left and stops the exporter. It waits for the last
-    // tracer to close: spans can come until then.
-    fn shutdown(sink self: Provider) void {
+    // shutdown, for a defer: what happened goes unread.
+    fn close(sink self: Provider) void {
+        _ = self.shutdown()
+    }
+
+    // Sends what is left, stops the exporter, and says how it went. It
+    // waits for the last tracer to close: spans can come until then.
+    fn shutdown(sink self: Provider) Stats {
         self.tx.close()
         self.worker.join()
+        const s = self.stats.recv() orelse Stats{ .sent = 0, .failed_batches = 0, .failed_spans = 0, .last_status = 0 }
+        self.stats.close()
         @forget(self)
+        return s
     }
 }
 
-fn provider(threads: Threads, net: Net, a: Allocator, clock: Clock, rng: Random, cfg: Config) Provider {
+// The exporter for cfg, started. Fails with error.BadHeaders for headers
+// that do not parse, and, for an https:// endpoint, as tls/roots does
+// when the system's roots cannot be read (error.NoRoots).
+//
+// With the SDK disabled nothing is sampled, so nothing is sent: neither
+// the headers nor the roots are looked at, and a bad setting left in the
+// environment does not stop the program.
+fn provider(threads: Threads, net: Net, files: Fs, a: Allocator, clock: Clock, rng: Random, cfg: Config) !Provider {
+    var headers: Buf(u8) = .empty
+    errdefer a.free(headers)
+    if (!cfg.disabled) {
+        a.free(@replace(&headers, try cfgm.parse_headers(a, cfg.headers)))
+    }
+    a.append_str(&headers, "Content-Type: application/json\r\n")
+    const url = cfgm.traces_url(a, cfg)
+    errdefer a.free(url)
+    var trusted = x509.CertList.empty()
+    errdefer a.free(trusted)
+    if (!cfg.disabled and https.is_https(url)) {
+        a.free(@replace(&trusted, try roots.system(a, files)))
+    }
     const rx = threads.channel(Span, cfg.queue)
     const tx = rx.sender()
-    const worker = threads.spawn(export_loop, rx, net, a, clock, cfg)
-    return Provider{ .worker = worker, .tx = tx, .clock = clock, .rng = rng, .ratio = cfg.ratio }
+    const stats = threads.channel(Stats, 1)
+    const worker = threads.spawn(export_loop, rx, stats.sender(), net, a, clock, rng, trusted, url, headers, cfg)
+    return Provider{ .worker = worker, .tx = tx, .stats = stats, .clock = clock, .rng = rng, .ratio = cfg.ratio, .disabled = cfg.disabled }
 }
 
 const Tracer = owned struct {
@@ -95,10 +132,11 @@ const Tracer = owned struct {
     clock: Clock
     rng: Random
     ratio: f64
+    disabled: bool
 
     // Another tracer on the same exporter, for another thread.
     fn clone(self: Tracer) Tracer {
-        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio }
+        return Tracer{ .tx = self.tx.clone(), .clock = self.clock, .rng = self.rng, .ratio = self.ratio, .disabled = self.disabled }
     }
 
     fn close(sink self: Tracer) void {
@@ -108,19 +146,21 @@ const Tracer = owned struct {
 
     // A span started now, a child of parent (none() to start a trace).
     // A new trace is sampled at the configured ratio; a child is as its
-    // parent is. A span that is not sampled still has a context to pass
-    // on, but records nothing and is never sent.
+    // parent is; with the SDK disabled, none is. A span that is not
+    // sampled still has a context to pass on, but records nothing and is
+    // never sent.
     fn start(self: Tracer, a: Allocator, name: []u8, kind: Kind, parent: SpanContext) Span {
         var c = sc.none()
         if (parent.valid) {
             c.trace_id = parent.trace_id
-            c.sampled = parent.sampled
+            // Disabled overrides even a sampled parent's choice.
+            c.sampled = parent.sampled and !self.disabled
         } else {
             self.rng.fill(&c.trace_id[0..])
             if (sc.all_zero(c.trace_id[0..])) {
                 c.trace_id[15] = 1
             }
-            c.sampled = sampled(c.trace_id, self.ratio)
+            c.sampled = !self.disabled and sampled(c.trace_id, self.ratio)
         }
         self.rng.fill(&c.span_id[0..])
         if (sc.all_zero(c.span_id[0..])) {
@@ -232,13 +272,17 @@ fn sampled(id: [16]u8, ratio: f64) bool {
 
 // The exporter thread: spans into batches, a batch to the collector when
 // it is full or interval_ms after the last one went, and what is left
-// when every sender has closed.
-fn export_loop(sink rx: Receiver(Span), net: Net, a: Allocator, clock: Clock, cfg: Config) void {
+// when every sender has closed; then how it went, on done.
+fn export_loop(sink rx: Receiver(Span), sink done: Sender(Stats), net: Net, a: Allocator, clock: Clock, rng: Random, sink trusted: x509.CertList, sink url: Buf(u8), sink headers: Buf(u8), cfg: Config) void {
     defer rx.close()
+    defer done.close()
+    defer a.free(trusted)
+    defer a.free(url)
+    defer a.free(headers)
     var batch: Buf(Span) = .empty
     defer a.free(batch)
-    const url = a.concat(cfg.endpoint, "/v1/traces")
-    defer a.free(url)
+    var stats = Stats{ .sent = 0, .failed_batches = 0, .failed_spans = 0, .last_status = 0 }
+    const out = Out{ .net = net, .clock = clock, .rng = rng }
     var last = clock.monotonic()
     while (true) {
         const waited = (clock.monotonic() - last) / 1000000
@@ -247,13 +291,13 @@ fn export_loop(sink rx: Receiver(Span), net: Net, a: Allocator, clock: Clock, cf
             rx => |s| {
                 a.push(&batch, s)
                 if (@len(batch) >= cfg.batch) {
-                    send_batch(net, a, url, cfg, &batch)
+                    send_batch(out, a, trusted, url, headers, cfg, &batch, &stats)
                     last = clock.monotonic()
                 }
             }
             timeout(left) => {
                 if (@len(batch) > 0) {
-                    send_batch(net, a, url, cfg, &batch)
+                    send_batch(out, a, trusted, url, headers, cfg, &batch, &stats)
                 }
                 last = clock.monotonic()
             }
@@ -263,20 +307,46 @@ fn export_loop(sink rx: Receiver(Span), net: Net, a: Allocator, clock: Clock, cf
         }
     }
     if (@len(batch) > 0) {
-        send_batch(net, a, url, cfg, &batch)
+        send_batch(out, a, trusted, url, headers, cfg, &batch, &stats)
     }
+    done.send(stats)
+}
+
+// What a request to the collector needs besides the allocator.
+const Out = struct {
+    net: Net
+    clock: Clock
+    rng: Random
 }
 
 // One POST of the batch, which is emptied whether it got there or not:
 // telemetry that cannot be sent is let go, not kept to grow.
-fn send_batch(net: Net, a: Allocator, url: []u8, cfg: Config, inout batch: Buf(Span)) void {
+fn send_batch(out: Out, a: Allocator, trusted: x509.CertList, url: []u8, headers: []u8, cfg: Config, inout batch: Buf(Span), inout stats: Stats) void {
+    const n = @len(batch)
     const body = otlp.encode(a, cfg.service, batch[0..])
     defer a.free(body)
     a.free(@take(&batch))
     var opts = http.options()
     opts.timeout_ms = cfg.timeout_ms
-    const r = http.fetch(net, a, "POST", url, "Content-Type: application/json\r\n", body, opts) catch {
+    const r = https.fetch(out.net, a, out.rng, out.clock, trusted, "POST", url, headers, body, opts) catch {
+        stats.failed_batches = stats.failed_batches + 1
+        stats.failed_spans = stats.failed_spans + n
+        stats.last_status = 0
         return
+    }
+    if (r.status >= 200 and r.status < 300) {
+        // A 2xx may still say some were not taken (OTLP's partial success).
+        const rejected = otlp.rejected_spans(r.body, n)
+        stats.sent = stats.sent + n - rejected
+        if (rejected > 0) {
+            stats.failed_batches = stats.failed_batches + 1
+            stats.failed_spans = stats.failed_spans + rejected
+            stats.last_status = r.status
+        }
+    } else {
+        stats.failed_batches = stats.failed_batches + 1
+        stats.failed_spans = stats.failed_spans + n
+        stats.last_status = r.status
     }
     r.deinit(a)
 }

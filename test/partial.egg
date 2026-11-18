@@ -1,0 +1,45 @@
+// OTLP's partial success: partialSuccess.rejectedSpans, found by walking
+// the JSON, not by searching it, and never more than the batch.
+uses io
+
+const otlp = @import("otel/otlp")
+
+fn show(io: Io, body: []u8) void {
+    io.print(otlp.rejected_spans(body, 2), "  ", body)
+}
+
+// In a batch of 20, so the cap does not hide the count.
+fn of20(io: Io, body: []u8) void {
+    io.print(otlp.rejected_spans(body, 20), " of 20  ", body)
+}
+
+fn main(io: Io) void {
+    show(io, "{}")
+    show(io, "")
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":\"1\",\"errorMessage\":\"too old\"}}")
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":1}}")
+    show(io, " { \"partialSuccess\" : { \"errorMessage\" : \"a \\\"rejectedSpans\\\": 2\" , \"rejectedSpans\" : \"1\" } } ")
+    // Another field of the same name elsewhere is not it.
+    show(io, "{\"extension\":{\"rejectedSpans\":0},\"partialSuccess\":{\"rejectedSpans\":\"1\"}}")
+    show(io, "{\"partialSuccess\":{\"nested\":{\"rejectedSpans\":2}}}")
+    show(io, "{\"list\":[{\"partialSuccess\":{\"rejectedSpans\":2}}],\"partialSuccess\":{}}")
+    // More than the batch is the batch; a partialSuccess that is no
+    // object, none.
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":\"7\"}}")
+    show(io, "{\"partialSuccess\":\"rejectedSpans\"}")
+    // Not one whole JSON object: nothing counted.
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":\"1\"")
+    show(io, "{\"partialSuccess\":{\"rejectedSpans\":\"1\"}} trailing")
+    // The name decoded.
+    show(io, "{\"partialSuccess\":{\"rejected\\u0053pans\":\"1\"}}")
+    show(io, "{\"partial\\u0053uccess\":{\"rejectedSpans\":1}}")
+    // ProtoJSON integers: exponents and whole fractions; the whole token.
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":1e1}}")
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":\"1.0E1\"}}")
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":\"100e-1\"}}")
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":\"12\"}}")
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":\"1oops\"}}")
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":1.5}}")
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":-3}}")
+    of20(io, "{\"partialSuccess\":{\"rejectedSpans\":\"\\u0031\"}}")
+}

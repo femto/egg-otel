@@ -1,4 +1,5 @@
 quiet recording: false
+stats: sent 2, failed 1 spans in 1 batch, last status 200
 true
 true
 requests: 2

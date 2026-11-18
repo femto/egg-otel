@@ -1,0 +1,6 @@
+parent sampled: true
+child sampled: false, recording: false
+same trace: true
+root sampled: false
+sent 0, failed 0
+disabled with bad settings: started

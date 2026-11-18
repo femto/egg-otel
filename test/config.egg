@@ -1,0 +1,102 @@
+// The OTEL_* settings as config_from_env applies them (through apply and
+// sample, since a test cannot set the environment), header parsing, and
+// where spans go.
+uses alloc, io
+
+const otel = @import("otel")
+const cfgm = @import("otel/config")
+
+fn headers(io: Io, a: Allocator, s: []u8) void {
+    const h = cfgm.parse_headers(a, s) catch |e| {
+        io.print("[", s, "] -> ", @errorName(e))
+        return
+    }
+    // CR and LF shown, so the expected output is one line each.
+    var shown: Buf(u8) = .empty
+    defer a.free(shown)
+    for (h) |c| {
+        if (c == '\r') {
+            a.append_str(&shown, "\\r")
+        } else if (c == '\n') {
+            a.append_str(&shown, "\\n")
+        } else {
+            a.push(&shown, c)
+        }
+    }
+    io.print("[", s, "] -> [", shown, "]")
+    a.free(h)
+}
+
+fn url(io: Io, a: Allocator, c: otel.Config) void {
+    const u = cfgm.traces_url(a, c)
+    io.print(u)
+    a.free(u)
+}
+
+fn main(io: Io, a: Allocator) void {
+    var c = otel.config("default")
+    io.print(cfgm.apply(&c, "OTEL_SERVICE_NAME", "checkout"), " ", cfgm.apply(&c, "OTEL_SERVICE_NAME", ""), " ", c.service)
+    io.print(cfgm.apply(&c, "OTEL_EXPORTER_OTLP_TIMEOUT", "2500"), " ", cfgm.apply(&c, "OTEL_BSP_SCHEDULE_DELAY", " 200 "), " ", cfgm.apply(&c, "OTEL_BSP_MAX_QUEUE_SIZE", "64"), " ", cfgm.apply(&c, "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "16"))
+    io.print(c.timeout_ms, " ", c.interval_ms, " ", c.queue, " ", c.batch)
+    // Values that do not parse leave what was there.
+    io.print(cfgm.apply(&c, "OTEL_BSP_MAX_QUEUE_SIZE", "lots"), " ", cfgm.apply(&c, "OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "0"), " ", cfgm.apply(&c, "OTEL_BSP_SCHEDULE_DELAY", "-5"), " ", cfgm.apply(&c, "OTEL_NOT_A_THING", "1"), " ", c.queue, " ", c.batch, " ", c.interval_ms)
+    // Samplers.
+    io.print(cfgm.sample(&c, "always_off", ""), " ", c.ratio)
+    io.print(cfgm.sample(&c, "parentbased_traceidratio", "0.25"), " ", c.ratio)
+    io.print(cfgm.sample(&c, "traceidratio", "1.5"), " ", cfgm.sample(&c, "jaeger_remote", ""), " ", c.ratio)
+    io.print(cfgm.sample(&c, "always_on", ""), " ", c.ratio)
+    io.print(cfgm.apply(&c, "OTEL_SDK_DISABLED", "true"), " ", c.disabled)
+    // As config_from_env settles them: disabled stands beside any sampler
+    // (and over a parent's choice: test/disabled).
+    var d = otel.config("d")
+    cfgm.settle(&d, "always_on", "", "true")
+    io.print("always_on, disabled: ", d.ratio, " ", d.disabled)
+    var e = otel.config("e")
+    cfgm.settle(&e, "traceidratio", "0.5", "false")
+    io.print("traceidratio, not disabled: ", e.ratio, " ", e.disabled)
+    // Where spans go.
+    url(io, a, c)
+    io.print(cfgm.apply(&c, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://s1234.eu-nbg-2.betterstackdata.com/"))
+    url(io, a, c)
+    _ = cfgm.apply(&c, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://in.example.com/custom/traces")
+    url(io, a, c)
+    // OTEL_SDK_DISABLED in any case.
+    var f = otel.config("f")
+    io.print(cfgm.apply(&f, "OTEL_SDK_DISABLED", "TRUE"), " ", f.disabled)
+    var g = otel.config("g")
+    cfgm.settle(&g, "", "", " True")
+    io.print("True: ", g.disabled)
+    // A setting that is not good leaves a good one before it.
+    var h = otel.config("h")
+    io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://ok.example"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "not-a-url"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_ENDPOINT", "https://"), " [", h.endpoint, "] [", h.traces_endpoint, "]")
+    io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_HEADERS", "Authorization=Bearer abc"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "novalue"), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x team=core"), " [", h.headers, "]")
+    // Empty is as if unset: the token stays.
+    io.print(cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", ""), " ", cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "  "), " [", h.headers, "]")
+    // A traces endpoint with spaces around it goes without them.
+    _ = cfgm.apply(&h, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", " https://collector.example/custom ")
+    url(io, a, h)
+    // /v1/traces at the end of the path, before a query or fragment.
+    var q = otel.config("q")
+    q.endpoint = "https://collector.example/ingest/?tenant=a#top"
+    url(io, a, q)
+    q.endpoint = "http://collector.example:4318"
+    url(io, a, q)
+    q.endpoint = " http://collector.example// "
+    url(io, a, q)
+    // Headers, as OTEL_EXPORTER_OTLP_HEADERS writes them.
+    headers(io, a, "Authorization=Bearer abc123")
+    headers(io, a, "Authorization=Bearer%20abc123, x-team = core ,,")
+    headers(io, a, "")
+    headers(io, a, "k=v%2Cw%3D")
+    headers(io, a, "novalue")
+    headers(io, a, "=v")
+    headers(io, a, "k=a%0D%0AX-Evil: 1")
+    headers(io, a, "k=50%")
+    // A name is an HTTP token; a Content-Type of any case is left out.
+    headers(io, a, "x team=core")
+    headers(io, a, "x%20team=core")
+    headers(io, a, "Content-Type=application/x-protobuf, Authorization=Bearer x")
+    headers(io, a, "content%2Dtype=text/plain,x-team=core")
+    // So are the fields std/http frames the request with.
+    headers(io, a, "Content-Length=0,TRANSFER-ENCODING=chunked,Host=evil.example,connection=keep-alive,Authorization=Bearer x")
+}

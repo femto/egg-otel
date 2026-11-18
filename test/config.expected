@@ -1,0 +1,37 @@
+true false checkout
+true true true true
+2500 200 64 16
+false false false false 64 16 200
+true 0.0
+true 0.25
+false false 0.25
+true 1.0
+true true
+always_on, disabled: 1.0 true
+traceidratio, not disabled: 0.5 false
+http://localhost:4318/v1/traces
+true
+https://s1234.eu-nbg-2.betterstackdata.com/v1/traces
+https://in.example.com/custom/traces
+true true
+True: true
+true false false [https://ok.example] []
+true false false [Authorization=Bearer abc]
+false false [Authorization=Bearer abc]
+https://collector.example/custom
+https://collector.example/ingest/v1/traces?tenant=a#top
+http://collector.example:4318/v1/traces
+http://collector.example/v1/traces
+[Authorization=Bearer abc123] -> [Authorization: Bearer abc123\r\n]
+[Authorization=Bearer%20abc123, x-team = core ,,] -> [Authorization: Bearer abc123\r\nx-team: core\r\n]
+[] -> []
+[k=v%2Cw%3D] -> [k: v,w=\r\n]
+[novalue] -> BadHeaders
+[=v] -> BadHeaders
+[k=a%0D%0AX-Evil: 1] -> BadHeaders
+[k=50%] -> [k: 50%\r\n]
+[x team=core] -> BadHeaders
+[x%20team=core] -> BadHeaders
+[Content-Type=application/x-protobuf, Authorization=Bearer x] -> [Authorization: Bearer x\r\n]
+[content%2Dtype=text/plain,x-team=core] -> [x-team: core\r\n]
+[Content-Length=0,TRANSFER-ENCODING=chunked,Host=evil.example,connection=keep-alive,Authorization=Bearer x] -> [Authorization: Bearer x\r\n]

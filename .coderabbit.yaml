@@ -1,0 +1,7 @@
+# .egg files here are Egg source, not Python's egg archives, which
+# CodeRabbit ignores by default ("!**/*.egg"). That default's pattern
+# without its "!" lifts it without narrowing the review to .egg files
+# (an include of any other pattern would make the list an allowlist).
+reviews:
+  path_filters:
+    - "**/*.egg"
