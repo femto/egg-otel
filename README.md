@@ -31,7 +31,7 @@ fn main(env: Args, files: Fs, net: Net, a: Allocator, threads: Threads, clock: C
 }
 ```
 
-It needs Egg after 0.2.1 (`tx.try_send`, femto/egg#133; `http.fetch_once`
+It needs Egg 0.2.2 or later (`tx.try_send`, femto/egg#133; `http.fetch_once`
 as egg-tls calls it, #134; `select` compiling quickly, #135), and
 [egg-tls](https://github.com/femto/egg-tls) for `https://`. In a project's
 `clutch.toml`:
