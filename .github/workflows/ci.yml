@@ -11,9 +11,9 @@ permissions:
 env:
   # The oldest Egg this package supports (README): tx.try_send came in
   # femto/egg#133, http.fetch_once as egg-tls calls it again in #134, and
-  # select compiling quickly in #135, all after 0.2.1.
+  # select compiling quickly in #135, all in 0.2.2.
   EGG_REPO: femto/egg
-  EGG_REF: c5b0c7decf1ed1fb1755edfef5d42a34b8ee7d4b # main after #135
+  EGG_REF: 6188dcfee973ca37609d39ee9c0c9980b8d6be41 # v0.2.2
 
 jobs:
   test:
